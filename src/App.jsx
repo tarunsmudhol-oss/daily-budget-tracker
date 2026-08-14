@@ -11,6 +11,8 @@ const [savings, setSavings] = useState(0);
 const [lastDate, setLastDate] = useState(todayString);
 const [goalName, setGoalName] = useState("Headphones");
 const [goalTarget, setGoalTarget] = useState(2000);
+const [expenseInput, setExpenseInput] = useState("");
+const [debtDays, setDebtDays] = useState([1, 2, 3, 4]);
 
   // Load saved data
  useEffect(() => {
@@ -56,19 +58,18 @@ const [goalTarget, setGoalTarget] = useState(2000);
   }, [spentToday, debt, savings]);
 
   const availableToday = debt > 0 ? 0 : Math.max(0, DAILY_LIMIT - spentToday);
-  const progress = Math.min((savings / goalTarget) * 100, 100);
+  
+  const debtDaysCount = debt > 0 ? Math.ceil(debt / DAILY_LIMIT) + 1 : 0;
 
- const addExpense = () => {
-  const value = prompt("Enter expense amount");
+const debtDays = Array.from(
+  { length: debtDaysCount },
+  (_, index) => index + 1
+);
 
-  if (!value) return;
+ const addExpense = (amount) => {
+  
 
-  const amount = Number(value);
-
-  if (isNaN(amount) || amount <= 0) {
-    alert("Enter a valid amount");
-    return;
-  }
+  
 
   // If debt exists, any new spending increases debt
   if (debt > 0) {
@@ -134,12 +135,32 @@ const [goalTarget, setGoalTarget] = useState(2000);
               <p className="text-2xl font-semibold text-red-600">₹{debt}</p>
             </div>
 
-            <button
-              onClick={addExpense}
-              className="mt-5 w-full rounded-xl bg-black text-white py-3 text-lg font-medium active:scale-95 transition"
-            >
-              Add Expense
-            </button>
+            <div className="mt-5 space-y-3">
+  <input
+    type="number"
+    placeholder="Enter expense amount"
+    value={expenseInput}
+    onChange={(e) => setExpenseInput(e.target.value)}
+    className="w-full rounded-xl border border-gray-300 px-4 py-3 text-lg outline-none focus:ring-2 focus:ring-black"
+  />
+
+  <button
+    onClick={() => {
+      const amount = Number(expenseInput);
+
+      if (!expenseInput || isNaN(amount) || amount <= 0) {
+        alert("Enter a valid amount");
+        return;
+      }
+
+      addExpense(amount);
+      setExpenseInput("");
+    }}
+    className="w-full rounded-xl bg-black text-white py-3 text-lg font-medium active:scale-95 transition"
+  >
+    Add Expense
+  </button>
+</div>
           </div>
 
           {/* Savings Card */}
@@ -181,10 +202,10 @@ const [goalTarget, setGoalTarget] = useState(2000);
               <div
                 key={i}
                 className={`rounded-lg py-3 font-medium ${
-                  debt > 0
-                    ? "bg-red-200 text-red-800"
-                    : "bg-green-100 text-green-800"
-                }`}
+  debtDays.includes(i + 1)
+    ? "bg-red-200 text-red-800"
+    : "bg-green-100 text-green-800"
+}`}
               >
                 {i + 1}
               </div>
