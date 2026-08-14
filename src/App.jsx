@@ -26,28 +26,33 @@ function App() {
     );
   }, [spentToday, debt, savings]);
 
-  const availableToday = Math.max(0, DAILY_LIMIT - spentToday);
+  const availableToday = debt > 0 ? 0 : Math.max(0, DAILY_LIMIT - spentToday);
 
-  const addExpense = () => {
-    const value = prompt("Enter expense amount");
+ const addExpense = () => {
+  const value = prompt("Enter expense amount");
 
-    if (!value) return;
+  if (!value) return;
 
-    const amount = Number(value);
+  const amount = Number(value);
 
-    if (isNaN(amount) || amount <= 0) {
-      alert("Enter a valid amount");
-      return;
-    }
+  if (isNaN(amount) || amount <= 0) {
+    alert("Enter a valid amount");
+    return;
+  }
 
-    const newSpent = spentToday + amount;
-    setSpentToday(newSpent);
+  // If debt exists, any new spending increases debt
+  if (debt > 0) {
+    setDebt(debt + amount);
+    return;
+  }
 
-    // Increase debt only if limit exceeded
-    if (newSpent > DAILY_LIMIT) {
-      setDebt(newSpent - DAILY_LIMIT);
-    }
-  };
+  const newSpent = spentToday + amount;
+  setSpentToday(newSpent);
+
+  if (newSpent > DAILY_LIMIT) {
+    setDebt(newSpent - DAILY_LIMIT);
+  }
+};
 
   const addSavings = () => {
     const value = prompt("Enter amount to save");
