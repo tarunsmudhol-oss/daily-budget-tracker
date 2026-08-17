@@ -2219,7 +2219,7 @@ function App() {
               </div>
 
               <div className="w-11 h-11 rounded-2xl bg-blue-50 flex items-center justify-center text-blue-600 font-bold">
-                $
+                ₹
               </div>
 
             </div>
