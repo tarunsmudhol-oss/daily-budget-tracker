@@ -1,134 +1,5 @@
-Pasted text(20260816-070818).txt
-Document
-see this the app.jsx code
-Pasted text(20260816-072736).txt
-Document
-improve this in the mobile version 
-every thing should dispaly properly in the date box 
-Yesterday 2:20 PM
-but not still good 
-remove that recover in that
-i want all dates in the one frame only 
-Edit
- do this in the code 
-in this all infromtion is not displaying  properly but make it scroll type users can scroll and see all the information 
-what here
-in this what 
-Pasted markdown(3).md
-File
-i should replce this code 
-Pasted markdown(4).md
-File
-now again too many errors 
-Pasted text(20260816-181506).txt
-Document
-still to many errors 
-Pasted text(20260816-191551).txt
-Document
-this the the final code
-Today 9:15 AM
-where ois the Authentication   here 
-see this not working 
-
-The bug is in the recovery calendar logic, not Supabase.
-
-Right now your code locks the expense date itself, but when you add ₹2,000 on 15 Aug, it does not generate the recovery chain starting from 16 Aug. The current code calculates recovery only from today, which is why the calendar can show normal days after the old ₹2,000 expense.
-
-For your rule, it should work like this:
-
-Example
-
-If on 15 Aug you spend ₹2,000:
-
-Daily limit = ₹70
-₹2,000 − ₹70 = ₹1,930 debt
-15 Aug → spending recorded
-16 Aug → 🔒 Recover ₹70
-17 Aug → 🔒 Recover ₹70
-18 Aug → 🔒 Recover ₹70
-Continue every day
-After 28 recovery days, debt becomes ₹0
-Until then, those days stay spending locked
-
-And if you add another ₹500 on 15 Aug later, the recovery schedule must become longer — it must not restart from today's date.
-
-Your current code specifically calculates:
-
-const recoveryDays =
-  debt > 0
-    ? Math.ceil(debt / DAILY_LIMIT)
-    : 0;
-
-and then starts recovery with:
-
-addDays(todayString, index + 1)
-
-That's the core problem.
-
-I would fix this by making the recovery schedule based on the actual date when the debt was created, including old/past expenses, rather than today's date.
-
-Do not change your Supabase table. Your budget_data table is already storing the user's data correctly.
-
-If you want, I can now give you the complete updated App.jsx with this past-date ₹2,000 recovery bug fixed, while keeping the current UI and multi-user Supabase sync.
-
-update that and give me 
-
-The recovery bug is now updated in the complete App.jsx.
-
-The important change is that a debt created on an earlier date, such as 15 Aug, is no longer treated as if it started today. The calendar now keeps the recovery days locked until the current outstanding debt reaches ₹0. It also displays the recovery amount inside the date box. Your existing history/recovery logic and Supabase multi-user storage are preserved.
-
-Download the full updated file
-
-Download updated App.jsx
-
-Replace the file
-
-Replace:
-
-src/App.jsx
-
-with the downloaded App.jsx.
-
-Then run:
-
-npm run dev
-Your ₹2,000 example
-
-If you spent about ₹2,000 on 15 Aug and your daily limit is ₹70, the calendar will continue showing:
-
-15
-Expense
-
-
-16
-Recover ₹70
-
-
-17
-Recover ₹70
-
-
-18
-Recover ₹70
-
-
-19
-Recover ₹70
-...
-
-and continue locking the dates until the remaining debt is recovered.
-
-The code also records the debt-start date so the recovery cycle doesn't get incorrectly reset to today.
-
-App.jsx
-Code
-see i want make my to understand what is this so make one simple html file 
-Analyzing
-
-Library
-/
-App.jsx
 import { useEffect, useMemo, useState } from "react";
+import { supabase } from "./supabaseClient";
 
 const DAILY_LIMIT = 70;
 
@@ -199,6 +70,12 @@ function App() {
   const [expenseInput, setExpenseInput] = useState("");
 
   /* =====================================================
+     DAILY BUDGET DATE VIEW
+  ===================================================== */
+
+  const [selectedDate, setSelectedDate] = useState(todayString);
+
+  /* =====================================================
      SAVINGS GOALS
   ===================================================== */
 
@@ -266,133 +143,398 @@ function App() {
     useState(false);
 
   /* =====================================================
-     LOAD DATA
+     SUPABASE AUTH
+  ===================================================== */
+
+  const [user, setUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authMode, setAuthMode] = useState("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [authMessage, setAuthMessage] = useState("");
+
+  /* =====================================================
+     IMMEDIATE USER PERSISTENCE
+  ===================================================== */
+
+  const saveLocalUserData = (overrides = {}) => {
+    if (!user?.id) return;
+
+    const payload = {
+      spentToday,
+      debt,
+      lastDate,
+      goals,
+      savingsPlans,
+      nextPlanNumber,
+      history,
+      calculatorTarget,
+      calculatorDaily,
+      ...overrides,
+      _savedAt: new Date().toISOString(),
+    };
+
+    try {
+      localStorage.setItem(
+        `budgetData_${user.id}`,
+        JSON.stringify(payload)
+      );
+      localStorage.setItem(
+        `budgetGoals_${user.id}`,
+        JSON.stringify(payload.goals || [])
+      );
+      localStorage.setItem(
+        `budgetCalculator_${user.id}`,
+        JSON.stringify({
+          target: payload.calculatorTarget ?? "",
+          daily: payload.calculatorDaily ?? "",
+        })
+      );
+      localStorage.setItem(
+        `budgetSavingsPlans_${user.id}`,
+        JSON.stringify(payload.savingsPlans || [])
+      );
+    } catch (error) {
+      console.error("Could not save local user data:", error);
+    }
+
+    return payload;
+  };
+
+  /* =====================================================
+     SUPABASE AUTH SESSION
   ===================================================== */
 
   useEffect(() => {
-    const savedData =
-      localStorage.getItem("budgetData");
+    let mounted = true;
 
-    if (!savedData) {
-      setDataLoaded(true);
-      return;
-    }
+    const loadSession = async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
 
-    try {
-      const data = JSON.parse(savedData);
+      if (!mounted) return;
 
-      let currentDebt = Number(data.debt || 0);
+      setUser(session?.user || null);
+      setAuthReady(true);
+    };
 
-      let currentSpent = Number(
-        data.spentToday || 0
-      );
+    loadSession();
 
-      const currentHistory =
-        data.history || [];
-
-      const savedDate =
-        data.lastDate || todayString;
-
-      if (savedDate !== todayString) {
-        const daysPassed = Math.max(
-          1,
-          getDateDifference(
-            savedDate,
-            todayString
-          )
-        );
-
-        for (
-          let i = 1;
-          i <= daysPassed;
-          i++
-        ) {
-          if (currentDebt <= 0) {
-            break;
-          }
-
-          const recoveryDate =
-            addDays(savedDate, i);
-
-          const debtBefore =
-            currentDebt;
-
-          currentDebt = Math.max(
-            0,
-            currentDebt - DAILY_LIMIT
-          );
-
-          currentHistory.push({
-            id: `recovery-${recoveryDate}-${Date.now()}-${i}`,
-            type: "recovery",
-            date: recoveryDate,
-            amount: Math.min(
-              DAILY_LIMIT,
-              debtBefore
-            ),
-            debtBefore,
-            debtAfter: currentDebt,
-          });
-        }
-
-        currentSpent = 0;
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setUser(session?.user || null);
+        setAuthReady(true);
       }
+    );
 
-      const savedPlans =
-        data.savingsPlans || [];
-
-      const highestPlanNumber =
-        savedPlans.reduce(
-          (highest, plan) =>
-            Math.max(
-              highest,
-              Number(
-                plan.planNumber || 0
-              )
-            ),
-          0
-        );
-
-      setSpentToday(currentSpent);
-      setDebt(currentDebt);
-      setLastDate(todayString);
-
-      setGoals(data.goals || []);
-
-      setSavingsPlans(savedPlans);
-
-      setNextPlanNumber(
-        Math.max(
-          highestPlanNumber + 1,
-          Number(
-            data.nextPlanNumber || 1
-          )
-        )
-      );
-
-      setHistory(currentHistory);
-    } catch (error) {
-      console.error(
-        "Error loading budget data:",
-        error
-      );
-    }
-
-    setDataLoaded(true);
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
   /* =====================================================
-     SAVE DATA
+     LOAD USER DATA
   ===================================================== */
 
   useEffect(() => {
-    if (!dataLoaded) {
+    if (!authReady || !user) {
+      if (authReady && !user) {
+        setDataLoaded(true);
+      }
       return;
     }
 
-    localStorage.setItem(
-      "budgetData",
-      JSON.stringify({
+    let cancelled = false;
+
+    const loadUserData = async () => {
+      setDataLoaded(false);
+      setAuthError("");
+
+      const { data, error } = await supabase
+        .from("budget_data")
+        .select("data, updated_at")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (cancelled) return;
+
+      if (error) {
+        console.error("Error loading cloud data:", error);
+        setAuthError(
+          "Could not load your data. Check the Supabase table and RLS policies."
+        );
+        setDataLoaded(true);
+        return;
+      }
+
+      let sourceData = data?.data || null;
+
+      // Keep a user-specific browser backup as a safety net.
+      // This prevents a goal/plan/calculator value from disappearing if the
+      // browser is closed before Supabase finishes an upsert or if an older
+      // cloud record is missing newly added fields.
+      const userBackupKey = `budgetData_${user.id}`;
+      let localUserData = null;
+
+      try {
+        const rawUserBackup = localStorage.getItem(userBackupKey);
+        if (rawUserBackup) {
+          localUserData = JSON.parse(rawUserBackup);
+        }
+      } catch (backupError) {
+        console.error("Could not read user backup:", backupError);
+      }
+
+      // Merge the user-specific local backup with cloud data.
+      // Cloud remains the main source, but locally saved goals/calculator/plans
+      // are restored when the cloud copy is older or missing those fields.
+      if (localUserData) {
+        const cloudTime = Date.parse(sourceData?._savedAt || data?.updated_at || "") || 0;
+        const localTime = Date.parse(localUserData?._savedAt || "") || 0;
+
+        if (!sourceData || localTime > cloudTime) {
+          sourceData = {
+            ...(sourceData || {}),
+            ...localUserData,
+          };
+        } else {
+          sourceData = {
+            ...localUserData,
+            ...sourceData,
+            goals:
+              Array.isArray(sourceData.goals) && sourceData.goals.length > 0
+                ? sourceData.goals
+                : localUserData.goals || [],
+            savingsPlans:
+              Array.isArray(sourceData.savingsPlans) && sourceData.savingsPlans.length > 0
+                ? sourceData.savingsPlans
+                : localUserData.savingsPlans || [],
+            calculatorTarget:
+              sourceData.calculatorTarget != null
+                ? sourceData.calculatorTarget
+                : localUserData.calculatorTarget ?? "",
+            calculatorDaily:
+              sourceData.calculatorDaily != null
+                ? sourceData.calculatorDaily
+                : localUserData.calculatorDaily ?? "",
+          };
+        }
+      }
+
+      // Dedicated browser backups are used as a final fallback for the same user.
+      try {
+        const savedGoals = JSON.parse(
+          localStorage.getItem(`budgetGoals_${user.id}`) || "null"
+        );
+        const savedCalculator = JSON.parse(
+          localStorage.getItem(`budgetCalculator_${user.id}`) || "null"
+        );
+        const savedPlans = JSON.parse(
+          localStorage.getItem(`budgetSavingsPlans_${user.id}`) || "null"
+        );
+
+        if (!sourceData && (Array.isArray(savedGoals) || Array.isArray(savedPlans) || savedCalculator)) {
+          sourceData = {
+            goals: Array.isArray(savedGoals) ? savedGoals : [],
+            savingsPlans: Array.isArray(savedPlans) ? savedPlans : [],
+            calculatorTarget: savedCalculator?.target ?? "",
+            calculatorDaily: savedCalculator?.daily ?? "",
+            spentToday: 0,
+            debt: 0,
+            lastDate: todayString,
+            nextPlanNumber: 1,
+            history: [],
+            _savedAt: new Date().toISOString(),
+          };
+        } else if (sourceData) {
+          if ((!Array.isArray(sourceData.goals) || sourceData.goals.length === 0) && Array.isArray(savedGoals)) {
+            sourceData.goals = savedGoals;
+          }
+          if ((!Array.isArray(sourceData.savingsPlans) || sourceData.savingsPlans.length === 0) && Array.isArray(savedPlans)) {
+            sourceData.savingsPlans = savedPlans;
+          }
+          if (sourceData.calculatorTarget == null && savedCalculator) {
+            sourceData.calculatorTarget = savedCalculator.target ?? "";
+          }
+          if (sourceData.calculatorDaily == null && savedCalculator) {
+            sourceData.calculatorDaily = savedCalculator.daily ?? "";
+          }
+        }
+      } catch (backupError) {
+        console.error("Could not restore dedicated user backup:", backupError);
+      }
+
+      // Migrate the old single-user local data once if this account has no cloud data yet.
+      if (!sourceData) {
+        const localData = localStorage.getItem("budgetData");
+
+        if (localData) {
+          try {
+            sourceData = JSON.parse(localData);
+
+            const { error: migrationError } =
+              await supabase.from("budget_data").upsert(
+                {
+                  user_id: user.id,
+                  data: sourceData,
+                  updated_at: new Date().toISOString(),
+                },
+                { onConflict: "user_id" }
+              );
+
+            if (migrationError) {
+              console.error(
+                "Local data migration failed:",
+                migrationError
+              );
+            }
+          } catch (migrationError) {
+            console.error(
+              "Could not read local data:",
+              migrationError
+            );
+          }
+        }
+      }
+
+      if (!sourceData) {
+        setDataLoaded(true);
+        return;
+      }
+
+      try {
+        let currentDebt = Number(sourceData.debt || 0);
+        let currentSpent = Number(sourceData.spentToday || 0);
+
+        const currentHistory = [
+          ...(sourceData.history || []),
+        ];
+
+        const savedDate =
+          sourceData.lastDate || todayString;
+
+        if (savedDate !== todayString) {
+          const daysPassed = Math.max(
+            1,
+            getDateDifference(
+              savedDate,
+              todayString
+            )
+          );
+
+          for (
+            let i = 1;
+            i <= daysPassed;
+            i++
+          ) {
+            if (currentDebt <= 0) break;
+
+            const recoveryDate =
+              addDays(savedDate, i);
+
+            const debtBefore = currentDebt;
+
+            currentDebt = Math.max(
+              0,
+              currentDebt - DAILY_LIMIT
+            );
+
+            currentHistory.push({
+              id: `recovery-${recoveryDate}-${Date.now()}-${i}`,
+              type: "recovery",
+              date: recoveryDate,
+              amount: Math.min(
+                DAILY_LIMIT,
+                debtBefore
+              ),
+              debtBefore,
+              debtAfter: currentDebt,
+            });
+          }
+
+          currentSpent = 0;
+        }
+
+        const savedPlans =
+          sourceData.savingsPlans || [];
+
+        const highestPlanNumber =
+          savedPlans.reduce(
+            (highest, plan) =>
+              Math.max(
+                highest,
+                Number(plan.planNumber || 0)
+              ),
+            0
+          );
+
+        setSpentToday(currentSpent);
+        setDebt(currentDebt);
+        setLastDate(todayString);
+        setGoals(Array.isArray(sourceData.goals) ? sourceData.goals : []);
+        setSavingsPlans(Array.isArray(savedPlans) ? savedPlans : []);
+
+        // Restore the Savings Calculator inputs too.
+        // These used to exist only in React state, so they were lost on logout/login.
+        setCalculatorTarget(
+          sourceData.calculatorTarget != null
+            ? String(sourceData.calculatorTarget)
+            : ""
+        );
+        setCalculatorDaily(
+          sourceData.calculatorDaily != null
+            ? String(sourceData.calculatorDaily)
+            : ""
+        );
+
+        setNextPlanNumber(
+          Math.max(
+            highestPlanNumber + 1,
+            Number(
+              sourceData.nextPlanNumber || 1
+            )
+          )
+        );
+
+          setHistory(currentHistory);
+        setSelectedDate(todayString);
+      } catch (error) {
+        console.error(
+          "Error processing cloud data:",
+          error
+        );
+        setAuthError(
+          "Your saved data could not be read."
+        );
+      }
+
+      setDataLoaded(true);
+    };
+
+    loadUserData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, user, todayString]);
+
+  /* =====================================================
+     SAVE USER DATA
+  ===================================================== */
+
+  useEffect(() => {
+    if (!authReady || !user || !dataLoaded) {
+      return;
+    }
+
+    const saveUserData = async () => {
+      const payload = {
         spentToday,
         debt,
         lastDate,
@@ -400,9 +542,53 @@ function App() {
         savingsPlans,
         nextPlanNumber,
         history,
-      })
-    );
+
+        // Persist Savings Calculator inputs so they survive logout/login.
+        calculatorTarget,
+        calculatorDaily,
+
+        // Version the local/cloud copy so the newest copy wins on next login.
+        _savedAt: new Date().toISOString(),
+      };
+
+      // Save immediately to a user-specific browser backup as well.
+      // This is not a replacement for Supabase; it is a fallback for the same browser.
+      try {
+        localStorage.setItem(
+          `budgetData_${user.id}`,
+          JSON.stringify(payload)
+        );
+      } catch (backupError) {
+        console.error("Could not save local user backup:", backupError);
+      }
+
+      const { error } = await supabase
+        .from("budget_data")
+        .upsert(
+          {
+            user_id: user.id,
+            data: payload,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "user_id" }
+        );
+
+      if (error) {
+        console.error(
+          "Error saving cloud data:",
+          error
+        );
+        setAuthError(
+          "Could not save your latest changes."
+        );
+      }
+    };
+
+    saveUserData();
   }, [
+    authReady,
+    user,
+    dataLoaded,
     spentToday,
     debt,
     lastDate,
@@ -410,20 +596,146 @@ function App() {
     savingsPlans,
     nextPlanNumber,
     history,
-    dataLoaded,
+    calculatorTarget,
+    calculatorDaily,
   ]);
+
+  /* =====================================================
+     AUTH ACTIONS
+  ===================================================== */
+
+  const handleAuth = async (event) => {
+    event.preventDefault();
+
+    setAuthError("");
+    setAuthMessage("");
+
+    const email = authEmail.trim();
+    const password = authPassword;
+
+    if (!email || !password) {
+      setAuthError(
+        "Enter your email and password."
+      );
+      return;
+    }
+
+    if (password.length < 6) {
+      setAuthError(
+        "Password must be at least 6 characters."
+      );
+      return;
+    }
+
+    setAuthLoading(true);
+
+    if (authMode === "signup") {
+      const { data, error } =
+        await supabase.auth.signUp({
+          email,
+          password,
+        });
+
+      if (error) {
+        setAuthError(error.message);
+      } else if (!data.session) {
+        setAuthMessage(
+          "Account created. Check your email to confirm your account, then log in."
+        );
+        setAuthMode("login");
+      }
+    } else {
+      const { error } =
+        await supabase.auth.signInWithPassword({
+          email,
+          password,
+        });
+
+      if (error) {
+        setAuthError(error.message);
+      }
+    }
+
+    setAuthLoading(false);
+  };
+
+  const handleLogout = async () => {
+    // Save the latest state synchronously to browser storage before signing out.
+    // This prevents the last goal/calculator edit from being lost during logout.
+    saveLocalUserData();
+
+    const { error } =
+      await supabase.auth.signOut();
+
+    if (error) {
+      setAuthError(error.message);
+      return;
+    }
+
+    setUser(null);
+    setDataLoaded(false);
+  };
+
+  /* =====================================================
+     DAILY BUDGET DATE VALUES
+  ===================================================== */
+
+  const selectedDayItems = useMemo(() => {
+    return history.filter((item) => item.date === selectedDate);
+  }, [history, selectedDate]);
+
+  const selectedSpent = useMemo(() => {
+    return selectedDayItems
+      .filter((item) => item.type === "expense")
+      .reduce(
+        (total, item) => total + Number(item.amount || 0),
+        0
+      );
+  }, [selectedDayItems]);
+
+  const selectedDebt = useMemo(() => {
+    if (selectedDate === todayString) {
+      return debt;
+    }
+
+    const debtItems = selectedDayItems.filter(
+      (item) =>
+        (item.type === "expense" || item.type === "recovery") &&
+        item.debtAfter !== undefined
+    );
+
+    if (debtItems.length === 0) {
+      return 0;
+    }
+
+    return Number(debtItems[debtItems.length - 1].debtAfter || 0);
+  }, [selectedDate, selectedDayItems, todayString, debt]);
+
+  const selectedAvailable =
+    selectedDebt > 0
+      ? 0
+      : Math.max(0, DAILY_LIMIT - selectedSpent);
+
+  const previousBudgetDay = () => {
+    setSelectedDate((current) => addDays(current, -1));
+  };
+
+  const nextBudgetDay = () => {
+    setSelectedDate((current) => {
+      const next = addDays(current, 1);
+      return next > todayString ? current : next;
+    });
+  };
+
+  const goToBudgetToday = () => {
+    setSelectedDate(todayString);
+  };
 
   /* =====================================================
      AVAILABLE TODAY
   ===================================================== */
 
-  const availableToday =
-    debt > 0
-      ? 0
-      : Math.max(
-          0,
-          DAILY_LIMIT - spentToday
-        );
+  const availableToday = selectedAvailable;
 
   /* =====================================================
      ADD EXPENSE
@@ -433,44 +745,39 @@ function App() {
     const amount = Number(expenseInput);
 
     if (!amount || amount <= 0) {
-      alert(
-        "Enter a valid expense amount."
-      );
+      alert("Enter a valid expense amount.");
       return;
     }
 
-    if (debt > 0) {
-      const newDebt =
-        debt + amount;
+    if (selectedDate > todayString) {
+      return;
+    }
+
+    if (selectedDate === todayString && debt > 0) {
+      const newDebt = debt + amount;
 
       setDebt(newDebt);
-
       setHistory((previous) => [
         ...previous,
         {
           id: Date.now(),
           type: "expense",
           amount,
-          date: todayString,
+          date: selectedDate,
           debtAfter: newDebt,
         },
       ]);
-
       setExpenseInput("");
-
       return;
     }
 
-    const newSpent =
-      spentToday + amount;
-
-    const newDebt = Math.max(
-      0,
-      newSpent - DAILY_LIMIT
-    );
-
-    setSpentToday(newSpent);
-    setDebt(newDebt);
+    const daySpentBefore = selectedSpent;
+    const baseDebt = selectedDebt;
+    const newSpent = daySpentBefore + amount;
+    const newDebt =
+      baseDebt > 0
+        ? baseDebt + amount
+        : Math.max(0, newSpent - DAILY_LIMIT);
 
     setHistory((previous) => [
       ...previous,
@@ -478,12 +785,127 @@ function App() {
         id: Date.now(),
         type: "expense",
         amount,
-        date: todayString,
+        date: selectedDate,
         debtAfter: newDebt,
       },
     ]);
 
+    if (selectedDate === todayString) {
+      setSpentToday(newSpent);
+      setDebt(newDebt);
+    }
+
     setExpenseInput("");
+  };
+
+  /* =====================================================
+     EDIT EXPENSE
+  ===================================================== */
+
+  const editExpense = (expenseId) => {
+    const expense = history.find(
+      (item) => item.id === expenseId && item.type === "expense"
+    );
+
+    if (!expense) return;
+
+    const value = window.prompt(
+      `Edit expense for ${formatDate(expense.date)}\n\nEnter the new amount:`,
+      String(expense.amount)
+    );
+
+    if (value === null) return;
+
+    const newAmount = Number(value);
+
+    if (!Number.isFinite(newAmount) || newAmount <= 0) {
+      alert("Enter a valid expense amount.");
+      return;
+    }
+
+    setHistory((previous) => {
+      const updated = previous.map((item) =>
+        item.id === expenseId
+          ? { ...item, amount: newAmount }
+          : item
+      );
+
+      // Keep debt-after values consistent for every expense on the edited day.
+      const dayItems = updated.filter(
+        (item) =>
+          (item.type === "expense" || item.type === "saving") &&
+          item.date === expense.date
+      );
+
+      const dayExpenses = dayItems.filter(
+        (item) => item.type === "expense"
+      );
+
+      if (dayExpenses.length === 0) {
+        return updated;
+      }
+
+      const firstOriginal = previous.find(
+        (item) => item.id === dayExpenses[0].id
+      );
+
+      // Preserve any debt that existed before the first expense of this day.
+      const startingDebt = Math.max(
+        0,
+        Number(firstOriginal?.debtAfter || 0) -
+          Number(firstOriginal?.amount || 0)
+      );
+
+      let cumulativeUsage = 0;
+
+      return updated.map((item) => {
+        if (item.date !== expense.date || item.type !== "expense") {
+          return item;
+        }
+
+        cumulativeUsage += Number(item.amount || 0);
+
+        const debtAfter =
+          startingDebt > 0
+            ? startingDebt + cumulativeUsage
+            : Math.max(0, cumulativeUsage - DAILY_LIMIT);
+
+        return { ...item, debtAfter };
+      });
+    });
+
+    if (expense.date === todayString) {
+      const updatedTodayExpenses = history
+        .filter((item) => item.type === "expense" && item.date === todayString)
+        .map((item) =>
+          item.id === expenseId ? newAmount : Number(item.amount || 0)
+        );
+
+      const todaySpent = updatedTodayExpenses.reduce(
+        (total, amount) => total + Number(amount || 0),
+        0
+      );
+
+      setSpentToday(todaySpent);
+
+      // Preserve any debt that existed before today's expenses, then
+      // calculate today's remaining debt from the edited total.
+      const firstTodayExpense = history.find(
+        (item) => item.type === "expense" && item.date === todayString
+      );
+
+      const debtBeforeToday = Math.max(
+        0,
+        Number(firstTodayExpense?.debtAfter || 0) -
+          Number(firstTodayExpense?.amount || 0)
+      );
+
+      setDebt(
+        debtBeforeToday > 0
+          ? debtBeforeToday + todaySpent
+          : Math.max(0, todaySpent - DAILY_LIMIT)
+      );
+    }
   };
 
   /* =====================================================
@@ -533,10 +955,13 @@ function App() {
       targetDate: goalDateInput,
     };
 
-    setGoals((previous) => [
-      ...previous,
+    const updatedGoals = [
+      ...goals,
       newGoal,
-    ]);
+    ];
+
+    setGoals(updatedGoals);
+    saveLocalUserData({ goals: updatedGoals });
 
     setGoalNameInput("");
     setGoalTargetInput("");
@@ -585,12 +1010,12 @@ function App() {
       }
     }
 
-    setGoals((previous) =>
-      previous.filter(
-        (goal) =>
-          goal.id !== goalId
-      )
+    const updatedGoals = goals.filter(
+      (goal) => goal.id !== goalId
     );
+
+    setGoals(updatedGoals);
+    saveLocalUserData({ goals: updatedGoals });
   };
 
   /* =====================================================
@@ -622,21 +1047,22 @@ function App() {
       return;
     }
 
-    setGoals((previous) =>
-      previous.map((goal) => {
-        if (goal.id !== goalId) {
-          return goal;
-        }
+    const updatedGoals = goals.map((goal) => {
+      if (goal.id !== goalId) {
+        return goal;
+      }
 
-        return {
-          ...goal,
-          saved: Math.min(
-            goal.target,
-            goal.saved + amount
-          ),
-        };
-      })
-    );
+      return {
+        ...goal,
+        saved: Math.min(
+          goal.target,
+          goal.saved + amount
+        ),
+      };
+    });
+
+    setGoals(updatedGoals);
+    saveLocalUserData({ goals: updatedGoals });
 
     setSpentToday(
       (previous) =>
@@ -874,20 +1300,27 @@ function App() {
         calculatorResult.endDate,
     };
 
-    setSavingsPlans((previous) => [
-      ...previous,
+    const updatedPlans = [
+      ...savingsPlans,
       newPlan,
-    ]);
+    ];
 
-    setNextPlanNumber(
-      (previous) =>
-        previous + 1
-    );
+    setSavingsPlans(updatedPlans);
+    setNextPlanNumber(nextPlanNumber + 1);
+    saveLocalUserData({
+      savingsPlans: updatedPlans,
+      nextPlanNumber: nextPlanNumber + 1,
+    });
 
     setShowGoalSelection(false);
 
-    setCalculatorTarget("");
-    setCalculatorDaily("");
+    // Keep the calculator values visible and persisted after creating a plan.
+    saveLocalUserData({
+      calculatorTarget,
+      calculatorDaily,
+      savingsPlans: updatedPlans,
+      nextPlanNumber: nextPlanNumber + 1,
+    });
 
     const startDate =
       new Date(
@@ -926,12 +1359,12 @@ function App() {
       return;
     }
 
-    setSavingsPlans((previous) =>
-      previous.filter(
-        (item) =>
-          item.id !== planId
-      )
+    const updatedPlans = savingsPlans.filter(
+      (item) => item.id !== planId
     );
+
+    setSavingsPlans(updatedPlans);
+    saveLocalUserData({ savingsPlans: updatedPlans });
   };
 
   /* =====================================================
@@ -941,13 +1374,17 @@ function App() {
   const clearCalculator = () => {
     setCalculatorTarget("");
     setCalculatorDaily("");
+    saveLocalUserData({
+      calculatorTarget: "",
+      calculatorDaily: "",
+    });
   };
 
   /* =====================================================
      RESET EVERYTHING
   ===================================================== */
 
-  const resetEverything = () => {
+  const resetEverything = async () => {
     const confirmed =
       window.confirm(
         "Are you sure you want to reset EVERYTHING?\n\n" +
@@ -958,9 +1395,30 @@ function App() {
       return;
     }
 
+    if (user) {
+      const { error } = await supabase
+        .from("budget_data")
+        .delete()
+        .eq("user_id", user.id);
+
+      if (error) {
+        setAuthError(
+          "Could not reset your cloud data."
+        );
+        return;
+      }
+    }
+
     localStorage.removeItem(
       "budgetData"
     );
+
+    if (user?.id) {
+      localStorage.removeItem(`budgetData_${user.id}`);
+      localStorage.removeItem(`budgetGoals_${user.id}`);
+      localStorage.removeItem(`budgetCalculator_${user.id}`);
+      localStorage.removeItem(`budgetSavingsPlans_${user.id}`);
+    }
 
     setSpentToday(0);
     setDebt(0);
@@ -1060,64 +1518,67 @@ function App() {
     );
 
   /* =====================================================
-     LOCKED DEBT DAYS
+     DEBT RECOVERY CALENDAR
   ===================================================== */
 
-  const lockedDates =
-    useMemo(() => {
-      const dates = new Set();
+  const recoveryDays =
+    debt > 0
+      ? Math.ceil(debt / DAILY_LIMIT)
+      : 0;
 
-      if (debt > 0) {
-        // Today is already over budget, so today is locked.
-        // The remaining debt must then be recovered on future days.
-        const recoveryDays =
-          Math.ceil(
-            debt / DAILY_LIMIT
-          );
+  const lockedDates = useMemo(() => {
+    const dates = new Set();
 
-        // Lock today + every recovery day.
-        for (
-          let i = 0;
-          i <= recoveryDays;
-          i++
-        ) {
-          dates.add(
-            addDays(
-              todayString,
-              i
-            )
-          );
-        }
+    if (debt > 0) {
+      dates.add(todayString);
+
+      for (let i = 1; i <= recoveryDays; i++) {
+        dates.add(addDays(todayString, i));
+      }
+    }
+
+    history.forEach((item) => {
+      if (
+        item.type === "expense" &&
+        Number(item.debtAfter || 0) > 0
+      ) {
+        dates.add(item.date);
       }
 
-      history.forEach((item) => {
-        if (
-          item.type ===
-            "expense" &&
-          Number(
-            item.debtAfter || 0
-          ) > 0
-        ) {
-          dates.add(item.date);
-        }
+      if (
+        item.type === "recovery" &&
+        Number(item.debtAfter || 0) > 0
+      ) {
+        dates.add(item.date);
+      }
+    });
 
-        if (
-          item.type ===
-            "recovery" &&
-          Number(
-            item.debtAfter || 0
-          ) > 0
-        ) {
-          dates.add(item.date);
-        }
-      });
+    return dates;
+  }, [debt, history, todayString, recoveryDays]);
 
-      return dates;
-    }, [
-      debt,
-      history,
+  const getRecoveryAmountForDate = (dateString) => {
+    if (debt <= 0) return 0;
+
+    const daysFromToday = getDateDifference(
       todayString,
-    ]);
+      dateString
+    );
+
+    if (
+      daysFromToday < 1 ||
+      daysFromToday > recoveryDays
+    ) {
+      return 0;
+    }
+
+    const recoveredBefore =
+      (daysFromToday - 1) * DAILY_LIMIT;
+
+    return Math.min(
+      DAILY_LIMIT,
+      Math.max(0, debt - recoveredBefore)
+    );
+  };
 
   /* =====================================================
      GET PLANS FOR DATE
@@ -1173,6 +1634,157 @@ function App() {
      RENDER
   ===================================================== */
 
+  if (!authReady) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-5">
+        <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-7 text-center w-full max-w-sm">
+          <div className="w-14 h-14 mx-auto rounded-2xl bg-violet-50 flex items-center justify-center text-violet-600 font-bold">
+            ₹
+          </div>
+          <h1 className="text-xl font-bold text-slate-900 mt-4">
+            Daily Budget Tracker
+          </h1>
+          <p className="text-sm text-slate-400 mt-2">
+            Loading your account...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-5">
+        <div className="w-full max-w-md">
+
+          <div className="text-center mb-6">
+            <div className="w-16 h-16 mx-auto rounded-3xl bg-violet-100 flex items-center justify-center text-violet-700 text-xl font-bold shadow-sm">
+              ₹
+            </div>
+
+            <h1 className="text-3xl font-bold text-slate-900 mt-4">
+              Daily Budget Tracker
+            </h1>
+
+            <p className="text-sm text-slate-500 mt-2">
+              {authMode === "login"
+                ? "Log in to access your personal budget."
+                : "Create your personal budget account."}
+            </p>
+          </div>
+
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-6">
+
+            <div className="grid grid-cols-2 bg-slate-100 rounded-2xl p-1 mb-5">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode("login");
+                  setAuthError("");
+                  setAuthMessage("");
+                }}
+                className={`rounded-xl py-2.5 text-sm font-semibold transition ${
+                  authMode === "login"
+                    ? "bg-white text-slate-900 shadow-sm"
+                    : "text-slate-500"
+                }`}
+              >
+                Login
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode("signup");
+                  setAuthError("");
+                  setAuthMessage("");
+                }}
+                className={`rounded-xl py-2.5 text-sm font-semibold transition ${
+                  authMode === "signup"
+                    ? "bg-white text-slate-900 shadow-sm"
+                    : "text-slate-500"
+                }`}
+              >
+                Sign Up
+              </button>
+            </div>
+
+            <form
+              onSubmit={handleAuth}
+              className="space-y-4"
+            >
+              <div>
+                <label className="text-xs font-semibold text-slate-600">
+                  Email
+                </label>
+
+                <input
+                  type="email"
+                  value={authEmail}
+                  onChange={(event) =>
+                    setAuthEmail(event.target.value)
+                  }
+                  placeholder="you@example.com"
+                  autoComplete="email"
+                  className="w-full mt-1.5 rounded-2xl border border-slate-200 px-4 py-3.5 outline-none focus:ring-2 focus:ring-violet-200"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-600">
+                  Password
+                </label>
+
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={(event) =>
+                    setAuthPassword(event.target.value)
+                  }
+                  placeholder="Minimum 6 characters"
+                  autoComplete={
+                    authMode === "login"
+                      ? "current-password"
+                      : "new-password"
+                  }
+                  className="w-full mt-1.5 rounded-2xl border border-slate-200 px-4 py-3.5 outline-none focus:ring-2 focus:ring-violet-200"
+                />
+              </div>
+
+              {authError && (
+                <div className="rounded-2xl bg-red-50 border border-red-100 px-4 py-3 text-sm text-red-600">
+                  {authError}
+                </div>
+              )}
+
+              {authMessage && (
+                <div className="rounded-2xl bg-emerald-50 border border-emerald-100 px-4 py-3 text-sm text-emerald-700">
+                  {authMessage}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={authLoading}
+                className="w-full rounded-2xl bg-slate-900 text-white py-3.5 font-semibold disabled:opacity-50 active:scale-[0.98] transition"
+              >
+                {authLoading
+                  ? "Please wait..."
+                  : authMode === "login"
+                  ? "Login"
+                  : "Create Account"}
+              </button>
+            </form>
+          </div>
+
+          <p className="text-center text-xs text-slate-400 mt-4">
+            Each account has its own separate budget data.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#f6f7fb] text-slate-800 pb-24">
 
@@ -1195,6 +1807,19 @@ function App() {
             plan what you want to save.
           </p>
 
+          <div className="flex items-center justify-between gap-3 mt-4">
+            <p className="text-xs text-slate-400 truncate">
+              Signed in as {user.email}
+            </p>
+
+            <button
+              onClick={handleLogout}
+              className="shrink-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 active:scale-95 transition"
+            >
+              Logout
+            </button>
+          </div>
+
         </header>
 
         {/* TOP CARDS */}
@@ -1210,12 +1835,38 @@ function App() {
               <div>
 
                 <p className="text-sm font-medium text-slate-400">
-                  Today's budget
+                  {selectedDate === todayString ? "Today's budget" : "Daily budget"}
                 </p>
 
                 <h2 className="text-xl font-bold text-slate-900 mt-1">
                   Daily Limit
                 </h2>
+
+                <div className="flex items-center gap-2 mt-3">
+                  <button
+                    onClick={previousBudgetDay}
+                    className="w-8 h-8 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 active:scale-95 transition"
+                    aria-label="Previous day"
+                  >
+                    ←
+                  </button>
+
+                  <button
+                    onClick={goToBudgetToday}
+                    className="rounded-xl bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-200 transition"
+                  >
+                    {formatDate(selectedDate)}
+                  </button>
+
+                  <button
+                    onClick={nextBudgetDay}
+                    disabled={selectedDate >= todayString}
+                    className="w-8 h-8 rounded-xl border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 active:scale-95 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                    aria-label="Next day"
+                  >
+                    →
+                  </button>
+                </div>
 
               </div>
 
@@ -1228,17 +1879,17 @@ function App() {
             <div className="mt-6">
 
               <p className="text-sm text-slate-400">
-                Available today
+                Available on this day
               </p>
 
               <p
                 className={`text-4xl font-bold mt-1 ${
-                  debt > 0
+                  selectedDebt > 0
                     ? "text-red-500"
                     : "text-emerald-600"
                 }`}
               >
-                ₹{availableToday}
+                ₹{selectedAvailable}
               </p>
 
             </div>
@@ -1252,7 +1903,7 @@ function App() {
                 </p>
 
                 <p className="text-lg font-bold mt-1">
-                  ₹{spentToday}
+                  ₹{selectedSpent}
                 </p>
 
               </div>
@@ -1264,14 +1915,14 @@ function App() {
                 </p>
 
                 <p className="text-lg font-bold text-red-500 mt-1">
-                  ₹{debt}
+                  ₹{selectedDebt}
                 </p>
 
               </div>
 
             </div>
 
-            {debt > 0 && (
+            {selectedDebt > 0 && (
               <div className="mt-4 rounded-2xl bg-red-50 border border-red-100 px-4 py-3">
 
                 <p className="text-sm text-red-600">
@@ -1286,8 +1937,8 @@ function App() {
 
               <input
                 type="number"
-                min="0"
-                placeholder="Enter expense amount"
+                min="1"
+                placeholder="Enter expense amount for this day"
                 value={expenseInput}
                 onChange={(e) =>
                   setExpenseInput(
@@ -1297,12 +1948,34 @@ function App() {
                 className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3.5 outline-none focus:bg-white focus:ring-2 focus:ring-slate-200"
               />
 
-              <button
-                onClick={addExpense}
-                className="w-full rounded-2xl bg-slate-900 text-white py-3.5 font-semibold hover:bg-slate-800 active:scale-[0.98] transition"
-              >
-                Add Expense
-              </button>
+              <div className="grid grid-cols-2 gap-3">
+
+                <button
+                  onClick={addExpense}
+                  className="w-full rounded-2xl bg-slate-900 text-white py-3.5 font-semibold hover:bg-slate-800 active:scale-[0.98] transition"
+                >
+                  Add Expense
+                </button>
+
+                <button
+                  onClick={() => {
+                    const expensesForDay = history.filter(
+                      (item) => item.type === "expense" && item.date === selectedDate
+                    );
+
+                    if (expensesForDay.length === 0) {
+                      alert("There is no expense to edit for this day.");
+                      return;
+                    }
+
+                    editExpense(expensesForDay[expensesForDay.length - 1].id);
+                  }}
+                  className="w-full rounded-2xl border border-slate-200 bg-white text-slate-700 py-3.5 font-semibold hover:bg-slate-50 active:scale-[0.98] transition"
+                >
+                  Edit Spent
+                </button>
+
+              </div>
 
             </div>
 
@@ -1377,6 +2050,440 @@ function App() {
         </div>
 
         {/* =================================================
+            CALENDAR
+        ================================================= */}
+
+        <section className="bg-white border border-slate-200 rounded-2xl sm:rounded-3xl p-3 sm:p-6 shadow-sm mt-4 sm:mt-5">
+
+          <div className="flex items-center justify-between mb-3 sm:mb-4">
+
+            <button
+              onClick={
+                previousMonth
+              }
+              className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl sm:rounded-2xl border border-slate-200 text-lg sm:text-xl text-slate-500 hover:bg-slate-50 active:scale-95 transition"
+            >
+              ‹
+            </button>
+
+            <div className="text-center">
+
+              <h2 className="text-base sm:text-lg font-bold text-slate-900">
+                {monthName}
+              </h2>
+
+              <button
+                onClick={
+                  goToCurrentMonth
+                }
+                className="text-[10px] sm:text-xs text-violet-600 font-semibold mt-0.5"
+              >
+                Current month
+              </button>
+
+              <p className="hidden sm:block text-[10px] text-slate-400 mt-1">
+                Red = spending locked • Violet = savings plan
+              </p>
+
+            </div>
+
+            <button
+              onClick={
+                nextMonth
+              }
+              className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl sm:rounded-2xl border border-slate-200 text-lg sm:text-xl text-slate-500 hover:bg-slate-50 active:scale-95 transition"
+            >
+              ›
+            </button>
+
+          </div>
+
+          <div className="grid grid-cols-7 gap-1 sm:gap-2 mb-1">
+
+            {[
+              "Sun",
+              "Mon",
+              "Tue",
+              "Wed",
+              "Thu",
+              "Fri",
+              "Sat",
+            ].map(
+              (day) => (
+                <div
+                  key={day}
+                  className="text-center text-[9px] sm:text-xs font-semibold text-slate-400 py-1.5 sm:py-2"
+                >
+                  {day}
+                </div>
+              )
+            )}
+
+          </div>
+
+          <div className="w-full overflow-x-auto overflow-y-hidden -mx-1 px-1 pb-2 overscroll-x-contain">
+
+            <div className="grid grid-cols-7 gap-2 sm:gap-2 min-w-[560px] sm:min-w-0 sm:w-full">
+
+              {Array.from(
+                {
+                  length: firstDay,
+                },
+                (_, index) => (
+                  <div
+                    key={`empty-${index}`}
+                    className="aspect-square w-full"
+                  />
+                )
+              )}
+
+              {Array.from(
+                {
+                  length: daysInMonth,
+                },
+                (_, index) => {
+
+                  const day = index + 1;
+
+                  const dateString =
+                    `${calendarYear}-${String(
+                      calendarMonth + 1
+                    ).padStart(2, "0")}-${String(
+                      day
+                    ).padStart(2, "0")}`;
+
+                  const isLocked =
+                    lockedDates.has(dateString);
+
+                  const isToday =
+                    dateString === todayString;
+
+                  const plans =
+                    getPlansForDate(dateString);
+
+                  const plannedTotal =
+                    plans.reduce(
+                      (total, plan) =>
+                        total + Number(plan.daily),
+                      0
+                    );
+
+                  const overBudget =
+                    plannedTotal > DAILY_LIMIT;
+
+                  const remainingAfterPlan =
+                    DAILY_LIMIT - plannedTotal;
+
+                  return (
+                    <div
+                      key={dateString}
+                      className={`relative aspect-square min-w-0 w-full rounded-xl border p-2 sm:p-2 overflow-hidden ${
+                        isLocked
+                          ? "bg-red-50 border-red-200"
+                          : isToday
+                          ? "bg-emerald-50 border-emerald-300"
+                          : "bg-slate-50 border-slate-100"
+                      }`}
+                    >
+
+                      {/* DATE + TODAY */}
+
+                      <div className="flex items-center justify-between gap-0.5">
+
+                        <span
+                          className={`text-xs sm:text-sm font-bold leading-none ${
+                            isLocked
+                              ? "text-red-600"
+                              : isToday
+                              ? "text-emerald-700"
+                              : "text-slate-600"
+                          }`}
+                        >
+                          {day}
+                        </span>
+
+                        {isToday && (
+                          <span className="text-[7px] sm:text-[8px] font-extrabold text-emerald-600 leading-none">
+                            TODAY
+                          </span>
+                        )}
+
+                      </div>
+
+                      {/* SAVINGS PLANS */}
+
+                      {plans.length > 0 && (
+                        <div className="mt-1 space-y-0.5">
+
+                          {plans.map((plan) => (
+                            <div
+                              key={plan.id}
+                              title={plan.goalName}
+                              className="text-[10px] sm:text-[10px] font-bold text-violet-600 leading-3 truncate"
+                            >
+                              SV{plan.planNumber} ₹{plan.daily}
+                            </div>
+                          ))}
+
+                          {/* PLANNED */}
+
+                          <div className="border-t border-violet-100 pt-[1px] mt-[1px]">
+
+                            <p
+                              className={`text-[9px] sm:text-[9px] font-bold leading-3 truncate ${
+                                overBudget
+                                  ? "text-red-500"
+                                  : "text-slate-500"
+                              }`}
+                            >
+                              Planned ₹{plannedTotal}
+                            </p>
+
+                            {/* LEFT */}
+
+                            {overBudget ? (
+                              <p className="text-[9px] sm:text-[8px] font-bold text-red-500 leading-3 truncate">
+                                Over ₹{plannedTotal - DAILY_LIMIT}
+                              </p>
+                            ) : (
+                              <p className="text-[9px] sm:text-[8px] text-slate-400 leading-3 truncate">
+                                ₹{remainingAfterPlan} left
+                              </p>
+                            )}
+
+                          </div>
+
+                        </div>
+                      )}
+
+                    </div>
+                  );
+                }
+              )}
+
+            </div>
+
+          </div>
+
+          <div className="flex flex-wrap gap-x-4 gap-y-2 mt-4 sm:mt-5 pt-3 sm:pt-4 border-t border-slate-100">
+
+            <div className="flex items-center gap-2">
+
+              <span className="w-3 h-3 rounded bg-emerald-100 border border-emerald-200" />
+
+              <span className="text-xs text-slate-500">
+                Today
+              </span>
+
+            </div>
+
+            <div className="flex items-center gap-2">
+
+              <span className="w-3 h-3 rounded bg-red-100 border border-red-200" />
+
+              <span className="text-xs text-slate-500">
+                Spending locked
+              </span>
+
+            </div>
+
+            <div className="flex items-center gap-2">
+
+              <span className="text-xs font-bold text-violet-600">
+                SV1
+              </span>
+
+              <span className="text-xs text-slate-500">
+                Savings plan
+              </span>
+
+            </div>
+
+          </div>
+
+        </section>
+
+        {/* =================================================
+            DEBT RECOVERY PLAN
+        ================================================= */}
+
+        <section className="bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-sm mt-5">
+          <div className="flex items-start gap-3 mb-5">
+            <div className="w-10 h-10 rounded-2xl bg-red-50 flex items-center justify-center text-red-600 shrink-0 font-bold">
+              ₹
+            </div>
+
+            <div>
+              <h2 className="text-base sm:text-lg font-bold text-slate-900">
+                Debt Recovery Plan
+              </h2>
+              <p className="text-sm text-slate-500 mt-1">
+                Your extra spending is recovered from future daily budgets.
+              </p>
+            </div>
+          </div>
+
+          {debt > 0 ? (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+
+                <div className="rounded-2xl bg-red-50 border border-red-100 p-3">
+                  <p className="text-[11px] text-red-500">Current Debt</p>
+                  <p className="text-xl sm:text-2xl font-bold text-red-600 mt-1">
+                    ₹{debt}
+                  </p>
+                </div>
+
+                <div className="rounded-2xl bg-orange-50 border border-orange-100 p-3">
+                  <p className="text-[11px] text-orange-500">
+                    Recovery / Day
+                  </p>
+                  <p className="text-xl sm:text-2xl font-bold text-orange-600 mt-1">
+                    ₹{DAILY_LIMIT}
+                  </p>
+                </div>
+
+                <div className="rounded-2xl bg-violet-50 border border-violet-100 p-3">
+                  <p className="text-[11px] text-violet-500">
+                    Recovery Days
+                  </p>
+                  <p className="text-xl sm:text-2xl font-bold text-violet-600 mt-1">
+                    {recoveryDays}
+                  </p>
+                </div>
+
+                <div className="rounded-2xl bg-slate-50 border border-slate-100 p-3">
+                  <p className="text-[11px] text-slate-500">
+                    Debt Clears
+                  </p>
+                  <p className="text-sm sm:text-base font-bold text-slate-800 mt-2">
+                    {formatDate(
+                      addDays(
+                        todayString,
+                        recoveryDays
+                      )
+                    )}
+                  </p>
+                </div>
+
+              </div>
+
+              <div className="mt-4 rounded-2xl border border-red-100 bg-red-50/50 p-4">
+
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-bold text-red-700">
+                      Recovery Schedule
+                    </p>
+                    <p className="text-xs text-red-500 mt-1">
+                      Starting {formatDate(
+                        addDays(todayString, 1)
+                      )}
+                    </p>
+                  </div>
+
+                  <span className="shrink-0 rounded-full bg-white border border-red-100 px-3 py-1 text-xs font-bold text-red-600">
+                    ₹{debt} total
+                  </span>
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+
+                  {Array.from(
+                    { length: recoveryDays },
+                    (_, index) => {
+                      const recoveryDate =
+                        addDays(
+                          todayString,
+                          index + 1
+                        );
+
+                      const amount =
+                        Math.min(
+                          DAILY_LIMIT,
+                          Math.max(
+                            0,
+                            debt -
+                              index *
+                                DAILY_LIMIT
+                          )
+                        );
+
+                      const remainingAfter =
+                        Math.max(
+                          0,
+                          debt -
+                            (index + 1) *
+                              DAILY_LIMIT
+                        );
+
+                      return (
+                        <div
+                          key={recoveryDate}
+                          className="rounded-2xl bg-white border border-red-100 p-3"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-sm font-semibold text-slate-700">
+                              Day {index + 1}
+                            </p>
+
+                            <p className="text-sm font-bold text-red-600">
+                              ₹{amount}
+                            </p>
+                          </div>
+
+                          <p className="text-xs text-slate-400 mt-1">
+                            {formatDate(recoveryDate)}
+                          </p>
+
+                          <div className="mt-2 h-1.5 rounded-full bg-red-100 overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-red-400"
+                              style={{
+                                width: `${Math.min(
+                                  100,
+                                  (amount /
+                                    DAILY_LIMIT) *
+                                    100
+                                )}%`,
+                              }}
+                            />
+                          </div>
+
+                          <p className="text-[11px] text-slate-400 mt-2">
+                            {remainingAfter > 0
+                              ? `₹${remainingAfter} debt remaining after this day`
+                              : "Debt fully recovered"}
+                          </p>
+                        </div>
+                      );
+                    }
+                  )}
+
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="rounded-2xl bg-emerald-50 border border-emerald-100 p-4">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-white flex items-center justify-center text-emerald-600 font-bold">
+                  ✓
+                </div>
+
+                <div>
+                  <p className="font-semibold text-emerald-700">
+                    No debt to recover
+                  </p>
+                  <p className="text-sm text-emerald-600 mt-1">
+                    Your ₹{DAILY_LIMIT} daily budget is available normally.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* =================================================
             SAVINGS CALCULATOR
         ================================================= */}
 
@@ -1390,7 +2497,7 @@ function App() {
 
             <div>
 
-              <h2 className="text-lg font-bold text-slate-900">
+              <h2 className="text-base sm:text-lg font-bold text-slate-900">
                 Savings Calculator
               </h2>
 
@@ -1416,11 +2523,11 @@ function App() {
                 min="1"
                 placeholder="₹5,000"
                 value={calculatorTarget}
-                onChange={(e) =>
-                  setCalculatorTarget(
-                    e.target.value
-                  )
-                }
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setCalculatorTarget(value);
+                  saveLocalUserData({ calculatorTarget: value });
+                }}
                 className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3.5 outline-none focus:bg-white focus:ring-2 focus:ring-violet-100"
               />
 
@@ -1437,11 +2544,11 @@ function App() {
                 min="1"
                 placeholder="₹100"
                 value={calculatorDaily}
-                onChange={(e) =>
-                  setCalculatorDaily(
-                    e.target.value
-                  )
-                }
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setCalculatorDaily(value);
+                  saveLocalUserData({ calculatorDaily: value });
+                }}
                 className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3.5 outline-none focus:bg-white focus:ring-2 focus:ring-violet-100"
               />
 
@@ -1550,15 +2657,13 @@ function App() {
           <div className="flex items-center justify-between mb-5">
 
             <div>
-
-              <h2 className="text-lg font-bold text-slate-900">
+              <h2 className="text-base sm:text-lg font-bold text-slate-900">
                 Savings Plans
               </h2>
 
               <p className="text-sm text-slate-500 mt-1">
-                Each plan is connected to a matching savings goal.
+                Your finalized SV plans and their progress.
               </p>
-
             </div>
 
             <div className="px-3 py-1.5 rounded-full bg-violet-50 text-violet-600 text-xs font-bold">
@@ -1571,89 +2676,379 @@ function App() {
 
             <div className="rounded-2xl border border-dashed border-slate-200 p-8 text-center">
 
-              <p className="text-slate-400 text-sm">
+              <div className="w-12 h-12 mx-auto rounded-2xl bg-violet-50 flex items-center justify-center text-violet-600 font-bold">
+                SV
+              </div>
+
+              <p className="text-slate-500 text-sm font-semibold mt-3">
                 No savings plans yet.
               </p>
 
               <p className="text-slate-300 text-xs mt-1">
-                Create a matching goal first.
+                Calculate a plan and finalize it with a matching goal.
               </p>
 
             </div>
 
           ) : (
 
-            <div className="space-y-3">
+            <div className="space-y-4">
 
-              {savingsPlans.map(
-                (plan) => (
+              {savingsPlans.map((plan) => {
+
+                const linkedGoal =
+                  goals.find(
+                    (goal) =>
+                      goal.id === plan.goalId
+                  );
+
+                const savedAmount =
+                  linkedGoal
+                    ? Number(
+                        linkedGoal.saved || 0
+                      )
+                    : 0;
+
+                const targetAmount =
+                  Number(plan.target || 0);
+
+                const progress =
+                  targetAmount > 0
+                    ? Math.min(
+                        100,
+                        (savedAmount /
+                          targetAmount) *
+                          100
+                      )
+                    : 0;
+
+                const todayTime =
+                  new Date(
+                    `${todayString}T00:00:00`
+                  ).getTime();
+
+                const startTime =
+                  new Date(
+                    `${plan.startDate}T00:00:00`
+                  ).getTime();
+
+                const endTime =
+                  new Date(
+                    `${plan.endDate}T00:00:00`
+                  ).getTime();
+
+                const completed =
+                  progress >= 100;
+
+                const notStarted =
+                  todayTime < startTime;
+
+                const ended =
+                  todayTime > endTime &&
+                  !completed;
+
+                const elapsedDays =
+                  notStarted
+                    ? 0
+                    : Math.min(
+                        plan.days,
+                        Math.max(
+                          1,
+                          getDateDifference(
+                            plan.startDate,
+                            todayString
+                          ) + 1
+                        )
+                      );
+
+                const remainingDays =
+                  Math.max(
+                    0,
+                    plan.days -
+                      elapsedDays
+                  );
+
+                return (
 
                   <div
                     key={plan.id}
-                    className="rounded-2xl border border-slate-200 p-4 hover:border-violet-200 transition"
+                    className="rounded-3xl border border-slate-200 overflow-hidden"
                   >
 
-                    <div className="flex items-start justify-between gap-4">
+                    {/* PLAN HEADER */}
 
-                      <div className="flex gap-3">
+                    <div className="p-4 bg-violet-50/60">
 
-                        <div className="min-w-12 h-12 px-2 rounded-2xl bg-violet-50 flex items-center justify-center text-violet-700 font-bold text-sm">
-                          SV
-                          {plan.planNumber}
+                      <div className="flex items-start justify-between gap-3">
+
+                        <div className="flex items-center gap-3 min-w-0">
+
+                          <div className="w-12 h-12 shrink-0 rounded-2xl bg-violet-600 flex items-center justify-center text-white font-bold text-sm">
+                            SV
+                            {plan.planNumber}
+                          </div>
+
+                          <div className="min-w-0">
+
+                            <p className="font-bold text-slate-900 truncate">
+                              SV
+                              {plan.planNumber}{" "}
+                              ₹{plan.daily}
+                              /day
+                            </p>
+
+                            <p className="text-sm font-semibold text-blue-600 mt-1 truncate">
+                              {plan.goalName}
+                            </p>
+
+                          </div>
+
                         </div>
 
-                        <div>
+                        <button
+                          onClick={() =>
+                            deleteSavingsPlan(
+                              plan.id
+                            )
+                          }
+                          className="shrink-0 text-xs font-semibold text-red-500 hover:text-red-600"
+                        >
+                          Delete
+                        </button>
 
-                          <p className="font-bold text-slate-900">
-                            SV
-                            {plan.planNumber}{" "}
-                            ₹{plan.daily}
+                      </div>
+
+                    </div>
+
+                    {/* PLAN DETAILS */}
+
+                    <div className="p-4">
+
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+
+                        <div className="rounded-2xl bg-slate-50 p-3">
+
+                          <p className="text-[11px] text-slate-400">
+                            Target
                           </p>
 
-                          <p className="text-sm font-semibold text-blue-600 mt-1">
-                            Goal:{" "}
-                            {plan.goalName}
+                          <p className="font-bold text-slate-800 mt-1">
+                            ₹{plan.target}
                           </p>
 
-                          <p className="text-sm text-slate-500 mt-1">
-                            Target ₹
-                            {plan.target}
+                        </div>
+
+                        <div className="rounded-2xl bg-blue-50 p-3">
+
+                          <p className="text-[11px] text-blue-400">
+                            Saved
                           </p>
 
-                          <p className="text-xs text-slate-400 mt-1">
-                            {formatDate(
-                              plan.startDate
-                            )}{" "}
-                            →{" "}
-                            {formatDate(
-                              plan.endDate
-                            )}
+                          <p className="font-bold text-blue-700 mt-1">
+                            ₹{savedAmount}
                           </p>
 
-                          <p className="text-xs text-slate-400">
-                            {plan.days} days
+                        </div>
+
+                        <div className="rounded-2xl bg-emerald-50 p-3">
+
+                          <p className="text-[11px] text-emerald-500">
+                            Progress
+                          </p>
+
+                          <p className="font-bold text-emerald-700 mt-1">
+                            {Math.round(
+                              progress
+                            )}%
+                          </p>
+
+                        </div>
+
+                        <div className="rounded-2xl bg-orange-50 p-3">
+
+                          <p className="text-[11px] text-orange-400">
+                            Days
+                          </p>
+
+                          <p className="font-bold text-orange-700 mt-1">
+                            {remainingDays}
                           </p>
 
                         </div>
 
                       </div>
 
-                      <button
-                        onClick={() =>
-                          deleteSavingsPlan(
-                            plan.id
-                          )
-                        }
-                        className="text-xs font-semibold text-red-500 hover:text-red-600"
-                      >
-                        Delete
-                      </button>
+                      {/* PROGRESS BAR */}
+
+                      <div className="mt-4">
+
+                        <div className="flex items-center justify-between text-xs mb-2">
+
+                          <span className="text-slate-400">
+                            Goal progress
+                          </span>
+
+                          <span className="font-semibold text-slate-600">
+                            ₹{savedAmount} / ₹
+                            {targetAmount}
+                          </span>
+
+                        </div>
+
+                        <div className="w-full h-3 bg-slate-100 rounded-full overflow-hidden">
+
+                          <div
+                            className="h-full bg-violet-600 rounded-full transition-all"
+                            style={{
+                              width: `${progress}%`,
+                            }}
+                          />
+
+                        </div>
+
+                      </div>
+
+                      {/* DATES */}
+
+                      <div className="grid grid-cols-2 gap-3 mt-4">
+
+                        <div>
+
+                          <p className="text-[11px] text-slate-400">
+                            Start date
+                          </p>
+
+                          <p className="text-sm font-semibold text-slate-700 mt-1">
+                            {formatDate(
+                              plan.startDate
+                            )}
+                          </p>
+
+                        </div>
+
+                        <div>
+
+                          <p className="text-[11px] text-slate-400">
+                            End date
+                          </p>
+
+                          <p className="text-sm font-semibold text-slate-700 mt-1">
+                            {formatDate(
+                              plan.endDate
+                            )}
+                          </p>
+
+                        </div>
+
+                      </div>
+
+                      {/* STATUS */}
+
+                      <div className="mt-4">
+
+                        {completed ? (
+
+                          <div className="rounded-2xl bg-emerald-50 border border-emerald-100 px-4 py-3">
+
+                            <p className="text-sm font-bold text-emerald-700">
+                              ✓ Goal completed
+                            </p>
+
+                            <p className="text-xs text-emerald-600 mt-1">
+                              You have reached ₹
+                              {targetAmount}.
+                            </p>
+
+                          </div>
+
+                        ) : notStarted ? (
+
+                          <div className="rounded-2xl bg-blue-50 border border-blue-100 px-4 py-3">
+
+                            <p className="text-sm font-bold text-blue-700">
+                              Plan starts soon
+                            </p>
+
+                            <p className="text-xs text-blue-600 mt-1">
+                              Start saving on{" "}
+                              {formatDate(
+                                plan.startDate
+                              )}.
+                            </p>
+
+                          </div>
+
+                        ) : ended ? (
+
+                          <div className="rounded-2xl bg-orange-50 border border-orange-100 px-4 py-3">
+
+                            <p className="text-sm font-bold text-orange-700">
+                              Plan period ended
+                            </p>
+
+                            <p className="text-xs text-orange-600 mt-1">
+                              ₹
+                              {Math.max(
+                                0,
+                                targetAmount -
+                                  savedAmount
+                              )}{" "}
+                              is still remaining.
+                            </p>
+
+                          </div>
+
+                        ) : (
+
+                          <div className="rounded-2xl bg-violet-50 border border-violet-100 px-4 py-3">
+
+                            <div className="flex items-center justify-between gap-3">
+
+                              <div>
+
+                                <p className="text-sm font-bold text-violet-700">
+                                  Plan active
+                                </p>
+
+                                <p className="text-xs text-violet-600 mt-1">
+                                  Save ₹
+                                  {plan.daily}
+                                  {" "}each day.
+                                </p>
+
+                              </div>
+
+                              <div className="text-right">
+
+                                <p className="text-xs text-violet-500">
+                                  Remaining
+                                </p>
+
+                                <p className="font-bold text-violet-700">
+                                  ₹
+                                  {Math.max(
+                                    0,
+                                    targetAmount -
+                                      savedAmount
+                                  )}
+                                </p>
+
+                              </div>
+
+                            </div>
+
+                          </div>
+
+                        )}
+
+                      </div>
 
                     </div>
 
                   </div>
-                )
-              )}
+
+                );
+              })}
 
             </div>
 
@@ -1667,27 +3062,23 @@ function App() {
 
         <section className="bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-sm mt-5">
 
-          <div className="flex items-center justify-between mb-5">
+          <div className="flex items-center justify-between gap-3 mb-5">
 
             <div>
-
-              <h2 className="text-lg font-bold text-slate-900">
+              <h2 className="text-base sm:text-lg font-bold text-slate-900">
                 Savings Goals
               </h2>
 
               <p className="text-sm text-slate-500 mt-1">
-                Add anything you want to save for.
+                Add your own goal and decide what you want to save for.
               </p>
-
             </div>
 
             <button
               onClick={() =>
-                setShowGoalForm(
-                  !showGoalForm
-                )
+                setShowGoalForm(!showGoalForm)
               }
-              className="rounded-2xl bg-slate-900 text-white px-4 py-2.5 text-sm font-semibold"
+              className="shrink-0 rounded-2xl bg-slate-900 text-white px-4 py-2.5 text-sm font-semibold active:scale-95 transition"
             >
               + Add Goal
             </button>
@@ -1695,68 +3086,67 @@ function App() {
           </div>
 
           {showGoalForm && (
-            <div className="rounded-2xl bg-slate-50 border border-slate-100 p-4 mb-5 space-y-3">
+            <div className="rounded-3xl bg-slate-50 border border-slate-200 p-4 sm:p-5 mb-5">
 
-              <input
-                type="text"
-                placeholder="What do you want to buy?"
-                value={goalNameInput}
-                onChange={(e) =>
-                  setGoalNameInput(
-                    e.target.value
-                  )
-                }
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3.5 outline-none focus:ring-2 focus:ring-slate-200"
-              />
+              <p className="font-semibold text-slate-800 mb-3">
+                Create a new goal
+              </p>
 
-              <input
-                type="number"
-                min="1"
-                placeholder="Target amount"
-                value={goalTargetInput}
-                onChange={(e) =>
-                  setGoalTargetInput(
-                    e.target.value
-                  )
-                }
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3.5 outline-none focus:ring-2 focus:ring-slate-200"
-              />
+              <div className="space-y-3">
 
-              <input
-                type="date"
-                min={addDays(
-                  todayString,
-                  1
-                )}
-                value={goalDateInput}
-                onChange={(e) =>
-                  setGoalDateInput(
-                    e.target.value
-                  )
-                }
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3.5 outline-none focus:ring-2 focus:ring-slate-200"
-              />
+                <input
+                  type="text"
+                  placeholder="Goal name"
+                  value={goalNameInput}
+                  onChange={(e) =>
+                    setGoalNameInput(e.target.value)
+                  }
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3.5 outline-none focus:ring-2 focus:ring-slate-200"
+                />
 
-              <div className="flex gap-3">
+                <input
+                  type="number"
+                  min="1"
+                  placeholder="How much do you need?"
+                  value={goalTargetInput}
+                  onChange={(e) =>
+                    setGoalTargetInput(e.target.value)
+                  }
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3.5 outline-none focus:ring-2 focus:ring-slate-200"
+                />
 
-                <button
-                  onClick={createGoal}
-                  className="flex-1 rounded-2xl bg-slate-900 text-white py-3 font-semibold"
-                >
-                  Create Goal
-                </button>
+                <input
+                  type="date"
+                  min={addDays(todayString, 1)}
+                  value={goalDateInput}
+                  onChange={(e) =>
+                    setGoalDateInput(e.target.value)
+                  }
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3.5 outline-none focus:ring-2 focus:ring-slate-200"
+                />
 
-                <button
-                  onClick={() => {
-                    setShowGoalForm(false);
-                    setGoalNameInput("");
-                    setGoalTargetInput("");
-                    setGoalDateInput("");
-                  }}
-                  className="rounded-2xl border border-slate-200 px-5 py-3 font-semibold text-slate-600"
-                >
-                  Cancel
-                </button>
+                <div className="flex flex-col sm:flex-row gap-3">
+
+                  <button
+                    onClick={createGoal}
+                    className="flex-1 rounded-2xl bg-slate-900 text-white py-3.5 font-semibold active:scale-[0.98] transition"
+                  >
+                    Create Goal
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setShowGoalForm(false);
+                      setGoalNameInput("");
+                      setGoalTargetInput("");
+                      setGoalDateInput("");
+                    }}
+                    className="rounded-2xl border border-slate-200 bg-white px-5 py-3.5 font-semibold text-slate-600"
+                  >
+                    Cancel
+                  </button>
+
+                </div>
 
               </div>
 
@@ -1765,14 +3155,18 @@ function App() {
 
           {goals.length === 0 ? (
 
-            <div className="rounded-2xl border border-dashed border-slate-200 p-8 text-center">
+            <div className="rounded-3xl border border-dashed border-slate-200 p-8 text-center">
 
-              <p className="text-slate-400 text-sm">
-                No savings goals added.
+              <div className="w-12 h-12 mx-auto rounded-2xl bg-blue-50 flex items-center justify-center text-blue-600 text-xl">
+                ₹
+              </div>
+
+              <p className="text-slate-600 text-sm font-semibold mt-3">
+                No savings goals yet.
               </p>
 
-              <p className="text-slate-300 text-xs mt-1">
-                Add something you want to buy.
+              <p className="text-slate-400 text-xs mt-1">
+                Add your first goal using the button above.
               </p>
 
             </div>
@@ -1781,105 +3175,108 @@ function App() {
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
-              {goals.map(
-                (goal) => {
+              {goals.map((goal) => {
 
-                  const remaining =
-                    Math.max(
-                      0,
-                      goal.target -
-                        goal.saved
-                    );
+                const target =
+                  Number(goal.target || 0);
 
-                  const daysLeft =
-                    Math.max(
-                      0,
-                      getDateDifference(
-                        todayString,
-                        goal.targetDate
-                      )
-                    );
+                const saved =
+                  Number(goal.saved || 0);
 
-                  const dailyNeeded =
-                    daysLeft > 0
-                      ? remaining /
-                        daysLeft
-                      : 0;
+                const remaining =
+                  Math.max(
+                    0,
+                    target - saved
+                  );
 
-                  const progress =
-                    Math.min(
-                      (goal.saved /
-                        goal.target) *
+                const daysLeft =
+                  Math.max(
+                    0,
+                    getDateDifference(
+                      todayString,
+                      goal.targetDate
+                    )
+                  );
+
+                const dailyNeeded =
+                  daysLeft > 0
+                    ? remaining / daysLeft
+                    : remaining;
+
+                const progress =
+                  target > 0
+                    ? Math.min(
                         100,
-                      100
-                    );
+                        (saved / target) * 100
+                      )
+                    : 0;
 
-                  const connectedPlan =
-                    savingsPlans.find(
-                      (plan) =>
-                        plan.goalId ===
-                        goal.id
-                    );
+                const completed =
+                  remaining <= 0;
 
-                  return (
-                    <div
-                      key={goal.id}
-                      className="rounded-2xl border border-slate-200 p-4"
-                    >
+                const connectedPlan =
+                  savingsPlans.find(
+                    (plan) =>
+                      plan.goalId === goal.id
+                  );
 
-                      <div className="flex justify-between gap-3">
+                return (
 
-                        <div>
+                  <div
+                    key={goal.id}
+                    className="rounded-3xl border border-slate-200 overflow-hidden"
+                  >
 
-                          <p className="text-xl font-bold text-slate-900">
+                    {/* GOAL HEADER */}
+
+                    <div className="p-4 bg-blue-50/60">
+
+                      <div className="flex items-start justify-between gap-3">
+
+                        <div className="min-w-0">
+
+                          <p className="text-lg sm:text-xl font-bold text-slate-900 truncate">
                             {goal.name}
                           </p>
 
-                          <p className="text-sm text-slate-400 mt-1">
-                            ₹{goal.saved} / ₹
-                            {goal.target}
+                          <p className="text-sm text-slate-500 mt-1">
+                            ₹{saved} saved of ₹{target}
                           </p>
 
                         </div>
 
                         <button
                           onClick={() =>
-                            deleteGoal(
-                              goal.id
-                            )
+                            deleteGoal(goal.id)
                           }
-                          className="text-xs font-semibold text-red-500"
+                          className="shrink-0 text-xs font-semibold text-red-500 hover:text-red-600"
                         >
                           Delete
                         </button>
 
                       </div>
 
-                      {connectedPlan && (
-                        <div className="mt-4 rounded-2xl bg-violet-50 border border-violet-100 p-3">
+                    </div>
 
-                          <p className="text-xs text-violet-400">
-                            Connected savings plan
-                          </p>
+                    <div className="p-4">
 
-                          <p className="font-bold text-violet-700 mt-1">
-                            SV
-                            {
-                              connectedPlan.planNumber
-                            }{" "}
-                            ₹
-                            {
-                              connectedPlan.daily
-                            }
-                            /day
-                          </p>
+                      {/* PROGRESS */}
+
+                      <div>
+
+                        <div className="flex justify-between items-center text-xs mb-2">
+
+                          <span className="text-slate-400">
+                            Progress
+                          </span>
+
+                          <span className="font-bold text-blue-600">
+                            {Math.round(progress)}%
+                          </span>
 
                         </div>
-                      )}
 
-                      <div className="mt-4">
-
-                        <div className="w-full h-2.5 rounded-full bg-slate-100 overflow-hidden">
+                        <div className="w-full h-3 rounded-full bg-slate-100 overflow-hidden">
 
                           <div
                             className="h-full rounded-full bg-blue-500 transition-all"
@@ -1890,63 +3287,55 @@ function App() {
 
                         </div>
 
-                        <p className="text-xs text-slate-400 mt-2">
-                          {Math.round(
-                            progress
-                          )}
-                          % completed
-                        </p>
-
                       </div>
+
+                      {/* GOAL DETAILS */}
 
                       <div className="grid grid-cols-2 gap-2 mt-4">
 
-                        <div className="bg-slate-50 rounded-xl p-3">
+                        <div className="rounded-2xl bg-slate-50 p-3">
 
-                          <p className="text-xs text-slate-400">
+                          <p className="text-[11px] text-slate-400">
                             Remaining
                           </p>
 
-                          <p className="font-bold">
+                          <p className="font-bold text-slate-800 mt-1">
                             ₹{remaining}
                           </p>
 
                         </div>
 
-                        <div className="bg-slate-50 rounded-xl p-3">
+                        <div className="rounded-2xl bg-slate-50 p-3">
 
-                          <p className="text-xs text-slate-400">
+                          <p className="text-[11px] text-slate-400">
                             Days left
                           </p>
 
-                          <p className="font-bold">
+                          <p className="font-bold text-slate-800 mt-1">
                             {daysLeft}
                           </p>
 
                         </div>
 
-                        <div className="bg-slate-50 rounded-xl p-3">
+                        <div className="rounded-2xl bg-slate-50 p-3">
 
-                          <p className="text-xs text-slate-400">
-                            Daily need
+                          <p className="text-[11px] text-slate-400">
+                            Daily needed
                           </p>
 
-                          <p className="font-bold">
-                            ₹
-                            {dailyNeeded.toFixed(
-                              2
-                            )}
+                          <p className="font-bold text-slate-800 mt-1">
+                            ₹{dailyNeeded.toFixed(2)}
                           </p>
 
                         </div>
 
-                        <div className="bg-slate-50 rounded-xl p-3">
+                        <div className="rounded-2xl bg-slate-50 p-3">
 
-                          <p className="text-xs text-slate-400">
-                            Target
+                          <p className="text-[11px] text-slate-400">
+                            Target date
                           </p>
 
-                          <p className="font-bold text-xs">
+                          <p className="font-bold text-slate-800 text-xs mt-2">
                             {formatDate(
                               goal.targetDate
                             )}
@@ -1956,6 +3345,71 @@ function App() {
 
                       </div>
 
+                      {/* CONNECTED PLAN */}
+
+                      {connectedPlan && (
+
+                        <div className="mt-4 rounded-2xl bg-violet-50 border border-violet-100 p-3">
+
+                          <div className="flex items-center justify-between gap-2">
+
+                            <div>
+
+                              <p className="text-[11px] text-violet-400">
+                                Connected plan
+                              </p>
+
+                              <p className="font-bold text-violet-700 mt-1">
+                                SV
+                                {connectedPlan.planNumber}
+                                {" "}₹
+                                {connectedPlan.daily}
+                                /day
+                              </p>
+
+                            </div>
+
+                            <span className="text-[10px] font-semibold text-violet-500">
+                              Active
+                            </span>
+
+                          </div>
+
+                        </div>
+
+                      )}
+
+                      {/* STATUS */}
+
+                      {completed ? (
+
+                        <div className="mt-4 rounded-2xl bg-emerald-50 border border-emerald-100 p-3">
+
+                          <p className="text-sm font-bold text-emerald-700">
+                            ✓ Goal completed
+                          </p>
+
+                        </div>
+
+                      ) : (
+
+                        <div className="mt-4 rounded-2xl bg-slate-50 p-3">
+
+                          <p className="text-xs text-slate-400">
+                            Save approximately
+                          </p>
+
+                          <p className="text-sm font-bold text-slate-700 mt-1">
+                            ₹{dailyNeeded.toFixed(2)}
+                            {" "}per day
+                          </p>
+
+                        </div>
+
+                      )}
+
+                      {/* ADD MONEY */}
+
                       <button
                         onClick={() => {
                           const value =
@@ -1963,9 +3417,7 @@ function App() {
                               `How much do you want to save for ${goal.name}?`
                             );
 
-                          if (
-                            value === null
-                          ) {
+                          if (value === null) {
                             return;
                           }
 
@@ -1974,305 +3426,21 @@ function App() {
                             Number(value)
                           );
                         }}
-                        className="w-full mt-4 rounded-2xl border border-slate-200 py-3 font-semibold text-slate-700 hover:bg-slate-50"
+                        className="w-full mt-4 rounded-2xl bg-slate-900 text-white py-3.5 font-semibold active:scale-[0.98] transition"
                       >
                         Add Money
                       </button>
 
                     </div>
-                  );
-                }
-              )}
+
+                  </div>
+
+                );
+              })}
 
             </div>
 
           )}
-
-        </section>
-
-        {/* =================================================
-            CALENDAR
-        ================================================= */}
-
-        <section className="bg-white border border-slate-200 rounded-3xl p-4 sm:p-6 shadow-sm mt-5">
-
-          <div className="flex items-center justify-between mb-4">
-
-            <button
-              onClick={
-                previousMonth
-              }
-              className="w-10 h-10 rounded-2xl border border-slate-200 text-xl text-slate-500 hover:bg-slate-50"
-            >
-              ‹
-            </button>
-
-            <div className="text-center">
-
-              <h2 className="text-lg font-bold text-slate-900">
-                {monthName}
-              </h2>
-
-              <button
-                onClick={
-                  goToCurrentMonth
-                }
-                className="text-xs text-violet-600 font-semibold mt-1"
-              >
-                Current month
-              </button>
-
-            </div>
-
-            <button
-              onClick={
-                nextMonth
-              }
-              className="w-10 h-10 rounded-2xl border border-slate-200 text-xl text-slate-500 hover:bg-slate-50"
-            >
-              ›
-            </button>
-
-          </div>
-
-          <div className="grid grid-cols-7 gap-1 sm:gap-2 mb-1">
-
-            {[
-              "Sun",
-              "Mon",
-              "Tue",
-              "Wed",
-              "Thu",
-              "Fri",
-              "Sat",
-            ].map(
-              (day) => (
-                <div
-                  key={day}
-                  className="text-center text-[10px] sm:text-xs font-semibold text-slate-400 py-2"
-                >
-                  {day}
-                </div>
-              )
-            )}
-
-          </div>
-
-          <div className="grid grid-cols-7 gap-1 sm:gap-2">
-
-            {Array.from(
-              {
-                length: firstDay,
-              },
-              (_, index) => (
-                <div
-                  key={`empty-${index}`}
-                  className="min-h-[75px] sm:min-h-[100px]"
-                />
-              )
-            )}
-
-            {Array.from(
-              {
-                length:
-                  daysInMonth,
-              },
-              (_, index) => {
-
-                const day =
-                  index + 1;
-
-                const dateString =
-                  `${calendarYear}-${String(
-                    calendarMonth + 1
-                  ).padStart(
-                    2,
-                    "0"
-                  )}-${String(
-                    day
-                  ).padStart(
-                    2,
-                    "0"
-                  )}`;
-
-                const isLocked =
-                  lockedDates.has(
-                    dateString
-                  );
-
-                const isToday =
-                  dateString ===
-                  todayString;
-
-                const plans =
-                  getPlansForDate(
-                    dateString
-                  );
-
-                const plannedTotal =
-                  plans.reduce(
-                    (total, plan) =>
-                      total +
-                      Number(
-                        plan.daily
-                      ),
-                    0
-                  );
-
-                const overBudget =
-                  plannedTotal >
-                  DAILY_LIMIT;
-
-                const remainingAfterPlan =
-                  DAILY_LIMIT -
-                  plannedTotal;
-
-                return (
-                  <div
-                    key={dateString}
-                    className={`min-h-[75px] sm:min-h-[100px] rounded-xl sm:rounded-2xl border p-1.5 sm:p-2 ${
-                      isLocked
-                        ? "bg-red-50 border-red-200"
-                        : isToday
-                        ? "bg-emerald-50 border-emerald-300"
-                        : "bg-slate-50 border-slate-100"
-                    }`}
-                  >
-
-                    <div className="flex justify-between items-start">
-
-                      <span
-                        className={`text-xs sm:text-sm font-bold ${
-                          isLocked
-                            ? "text-red-600"
-                            : isToday
-                            ? "text-emerald-700"
-                            : "text-slate-600"
-                        }`}
-                      >
-                        {day}
-                      </span>
-
-                      {isToday && (
-                        <span className="text-[7px] sm:text-[9px] font-bold text-emerald-600">
-                          TODAY
-                        </span>
-                      )}
-
-                    </div>
-
-                    {plans.length > 0 && (
-                      <div className="mt-1.5 space-y-0.5">
-
-                        {plans.map(
-                          (plan) => (
-                            <div
-                              key={plan.id}
-                              className="text-[8px] sm:text-[11px] font-bold text-violet-600 truncate"
-                              title={
-                                plan.goalName
-                              }
-                            >
-                              SV
-                              {
-                                plan.planNumber
-                              }{" "}
-                              ₹
-                              {
-                                plan.daily
-                              }
-                            </div>
-                          )
-                        )}
-
-                        <div className="mt-1 pt-1 border-t border-violet-100">
-
-                          <p
-                            className={`text-[8px] sm:text-[10px] font-bold ${
-                              overBudget
-                                ? "text-red-500"
-                                : "text-slate-500"
-                            }`}
-                          >
-                            Planned ₹
-                            {
-                              plannedTotal
-                            }
-                          </p>
-
-                          {overBudget ? (
-                            <p className="text-[7px] sm:text-[9px] font-bold text-red-500">
-                              ⚠ Over ₹
-                              {plannedTotal -
-                                DAILY_LIMIT}
-                            </p>
-                          ) : (
-                            <p className="text-[7px] sm:text-[9px] text-slate-400">
-                              ₹
-                              {
-                                remainingAfterPlan
-                              }{" "}
-                              left
-                            </p>
-                          )}
-
-                        </div>
-
-                      </div>
-                    )}
-
-                    {isLocked && (
-                      <p className="mt-2 text-[8px] sm:text-[10px] font-semibold text-red-500">
-                        {dateString === todayString
-                          ? debt > 0
-                            ? `Recover ₹${debt}`
-                            : "Locked"
-                          : "Recovery day"}
-                      </p>
-                    )}
-
-                  </div>
-                );
-              }
-            )}
-
-          </div>
-
-          <div className="flex flex-wrap gap-x-5 gap-y-2 mt-5 pt-4 border-t border-slate-100">
-
-            <div className="flex items-center gap-2">
-
-              <span className="w-3 h-3 rounded bg-emerald-100 border border-emerald-200" />
-
-              <span className="text-xs text-slate-500">
-                Today
-              </span>
-
-            </div>
-
-            <div className="flex items-center gap-2">
-
-              <span className="w-3 h-3 rounded bg-red-100 border border-red-200" />
-
-              <span className="text-xs text-slate-500">
-                Spending locked
-              </span>
-
-            </div>
-
-            <div className="flex items-center gap-2">
-
-              <span className="text-xs font-bold text-violet-600">
-                SV1
-              </span>
-
-              <span className="text-xs text-slate-500">
-                Savings plan
-              </span>
-
-            </div>
-
-          </div>
 
         </section>
 
@@ -2282,108 +3450,201 @@ function App() {
 
         <section className="bg-white border border-slate-200 rounded-3xl p-5 sm:p-6 shadow-sm mt-5">
 
-          <div className="flex items-center justify-between mb-5">
+          <div className="flex items-start justify-between gap-3 mb-5">
 
             <div>
-
-              <h2 className="text-lg font-bold text-slate-900">
+              <h2 className="text-base sm:text-lg font-bold text-slate-900">
                 History
               </h2>
 
               <p className="text-sm text-slate-400 mt-1">
-                Your transactions
+                All your expenses, savings, and debt recovery.
               </p>
-
             </div>
 
-            <div className="px-3 py-1.5 rounded-full bg-slate-100 text-slate-600 text-xs font-bold">
-              ₹{totalExpenses}
+            <div className="shrink-0 rounded-2xl bg-slate-100 px-3 py-2 text-right">
+
+              <p className="text-[10px] text-slate-400">
+                Total Expenses
+              </p>
+
+              <p className="text-sm font-bold text-slate-700">
+                ₹{totalExpenses}
+              </p>
+
             </div>
 
           </div>
 
           {history.length === 0 ? (
 
-            <div className="rounded-2xl border border-dashed border-slate-200 p-8 text-center">
+            <div className="rounded-3xl border border-dashed border-slate-200 p-8 text-center">
 
-              <p className="text-sm text-slate-400">
+              <div className="w-12 h-12 mx-auto rounded-2xl bg-slate-50 flex items-center justify-center text-slate-400 text-xl">
+                ↕
+              </div>
+
+              <p className="text-sm text-slate-500 font-semibold mt-3">
                 No transactions yet.
+              </p>
+
+              <p className="text-xs text-slate-400 mt-1">
+                Your activity will appear here.
               </p>
 
             </div>
 
           ) : (
 
-            <div className="space-y-2">
+            <div className="max-h-[520px] overflow-y-auto pr-1 space-y-2">
 
               {[...history]
                 .reverse()
-                .map(
-                  (item) => (
+                .map((item) => {
+
+                  const isSaving =
+                    item.type === "saving";
+
+                  const isRecovery =
+                    item.type === "recovery";
+
+                  const title =
+                    isSaving
+                      ? "Actual Saving"
+                      : isRecovery
+                      ? "Debt Recovery"
+                      : "Expense";
+
+                  const amountText =
+                    isSaving
+                      ? `+₹${item.amount}`
+                      : isRecovery
+                      ? `₹${item.amount} recovered`
+                      : `-₹${item.amount}`;
+
+                  const amountClass =
+                    isSaving
+                      ? "text-blue-600"
+                      : isRecovery
+                      ? "text-orange-500"
+                      : "text-red-500";
+
+                  const icon =
+                    isSaving
+                      ? "S"
+                      : isRecovery
+                      ? "R"
+                      : "E";
+
+                  const iconClass =
+                    isSaving
+                      ? "bg-blue-50 text-blue-600"
+                      : isRecovery
+                      ? "bg-orange-50 text-orange-600"
+                      : "bg-red-50 text-red-600";
+
+                  return (
 
                     <div
                       key={item.id}
-                      className="flex items-center justify-between rounded-2xl bg-slate-50 px-4 py-3"
+                      className="rounded-2xl border border-slate-100 bg-slate-50/70 p-3 sm:p-4"
                     >
 
-                      <div>
+                      <div className="flex items-center justify-between gap-3">
 
-                        <p className="font-semibold text-sm text-slate-800">
+                        <div className="flex items-center gap-3 min-w-0">
 
-                          {item.type ===
-                          "saving"
-                            ? "Actual Saving"
-                            : item.type ===
-                              "recovery"
-                            ? "Debt Recovery"
-                            : "Expense"}
+                          <div
+                            className={`w-10 h-10 shrink-0 rounded-xl flex items-center justify-center font-bold text-sm ${iconClass}`}
+                          >
+                            {icon}
+                          </div>
 
-                        </p>
+                          <div className="min-w-0">
 
-                        <p className="text-xs text-slate-400 mt-0.5">
-                          {formatDate(
-                            item.date
+                            <p className="font-semibold text-sm text-slate-800 truncate">
+                              {title}
+                            </p>
+
+                            <p className="text-xs text-slate-400 mt-1">
+                              {formatDate(item.date)}
+                            </p>
+
+                          </div>
+
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+
+                          <p
+                            className={`font-bold text-sm sm:text-base ${amountClass}`}
+                          >
+                            {amountText}
+                          </p>
+
+                          {!isSaving && !isRecovery && (
+                            <button
+                              onClick={() => editExpense(item.id)}
+                              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-500 hover:bg-slate-50"
+                            >
+                              Edit
+                            </button>
                           )}
-                        </p>
+
+                        </div>
 
                       </div>
 
-                      {item.type ===
-                      "saving" ? (
+                      {/* EXTRA EXPENSE INFORMATION */}
 
-                        <p className="font-bold text-blue-600">
-                          +₹
-                          {
-                            item.amount
-                          }
-                        </p>
+                      {!isSaving &&
+                        !isRecovery &&
+                        Number(item.debtAfter || 0) > 0 && (
 
-                      ) : item.type ===
-                        "recovery" ? (
+                          <div className="mt-3 rounded-xl bg-red-50 border border-red-100 px-3 py-2">
 
-                        <p className="font-bold text-orange-500">
-                          ₹
-                          {
-                            item.amount
-                          }{" "}
-                          recovered
-                        </p>
+                            <div className="flex items-center justify-between gap-2">
 
-                      ) : (
+                              <span className="text-[11px] text-red-500">
+                                Debt after expense
+                              </span>
 
-                        <p className="font-bold text-red-500">
-                          -₹
-                          {
-                            item.amount
-                          }
-                        </p>
+                              <span className="text-xs font-bold text-red-600">
+                                ₹{item.debtAfter}
+                              </span>
+
+                            </div>
+
+                          </div>
+
+                        )}
+
+                      {/* RECOVERY INFORMATION */}
+
+                      {isRecovery && (
+
+                        <div className="mt-3 rounded-xl bg-orange-50 border border-orange-100 px-3 py-2">
+
+                          <div className="flex items-center justify-between gap-2">
+
+                            <span className="text-[11px] text-orange-500">
+                              Remaining debt
+                            </span>
+
+                            <span className="text-xs font-bold text-orange-600">
+                              ₹{item.debtAfter || 0}
+                            </span>
+
+                          </div>
+
+                        </div>
 
                       )}
 
                     </div>
 
-                  )
-                )}
+                  );
+                })}
 
             </div>
 
@@ -2392,58 +3653,39 @@ function App() {
         </section>
 
         {/* =================================================
-            SUMMARY
-        ================================================= */}
-
-        <div className="grid grid-cols-2 gap-3 mt-5">
-
-          <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-sm">
-
-            <p className="text-xs text-slate-400">
-              Total spent
-            </p>
-
-            <p className="text-2xl font-bold text-slate-900 mt-1">
-              ₹{totalExpenses}
-            </p>
-
-          </div>
-
-          <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-sm">
-
-            <p className="text-xs text-slate-400">
-              Actually saved
-            </p>
-
-            <p className="text-2xl font-bold text-blue-600 mt-1">
-              ₹{totalActualSavings}
-            </p>
-
-          </div>
-
-        </div>
-
-        {/* =================================================
             RESET
         ================================================= */}
 
-        <div className="mt-6 mb-4">
+        <section className="mt-6 mb-4 rounded-3xl border border-red-100 bg-white p-5 sm:p-6 shadow-sm">
 
-          <button
-            onClick={
-              resetEverything
-            }
-            className="w-full rounded-2xl border border-red-200 bg-red-50 text-red-600 py-3.5 font-semibold hover:bg-red-100 active:scale-[0.98] transition"
-          >
-            Reset Everything
-          </button>
+          <div className="flex items-start gap-3">
 
-          <p className="text-center text-xs text-slate-400 mt-2">
-            This permanently deletes all
-            budget data.
-          </p>
+            <div className="w-10 h-10 shrink-0 rounded-2xl bg-red-50 flex items-center justify-center text-red-600 font-bold">
+              !
+            </div>
 
-        </div>
+            <div className="flex-1">
+
+              <h2 className="text-base sm:text-lg font-bold text-slate-900">
+                Reset Everything
+              </h2>
+
+              <p className="text-sm text-slate-500 mt-1">
+                Permanently delete all budget data, goals, plans, expenses, savings, debt, and history.
+              </p>
+
+              <button
+                onClick={resetEverything}
+                className="w-full mt-4 rounded-2xl bg-red-600 text-white py-3.5 font-semibold hover:bg-red-700 active:scale-[0.98] transition"
+              >
+                Reset Everything
+              </button>
+
+            </div>
+
+          </div>
+
+        </section>
 
       </div>
 
@@ -2656,53 +3898,53 @@ function App() {
           MOBILE NAVIGATION
       ================================================= */}
 
-      <nav className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur border-t border-slate-200 md:hidden z-50">
+      <nav className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur border-t border-slate-200 md:hidden z-50 pb-[env(safe-area-inset-bottom)]">
 
-        <div className="grid grid-cols-4 py-2">
+        <div className="grid grid-cols-4 py-1.5">
 
-          <button className="flex flex-col items-center gap-1 text-slate-700">
+          <button className="flex flex-col items-center gap-0.5 text-slate-700 py-1 active:scale-95 transition">
 
-            <span className="text-lg">
+            <span className="text-base leading-none">
               ⌂
             </span>
 
-            <span className="text-[10px] font-semibold">
+            <span className="text-[9px] font-semibold">
               Home
             </span>
 
           </button>
 
-          <button className="flex flex-col items-center gap-1 text-slate-500">
+          <button className="flex flex-col items-center gap-0.5 text-slate-500 py-1 active:scale-95 transition">
 
-            <span className="text-lg">
+            <span className="text-base leading-none">
               +
             </span>
 
-            <span className="text-[10px] font-semibold">
+            <span className="text-[9px] font-semibold">
               Save
             </span>
 
           </button>
 
-          <button className="flex flex-col items-center gap-1 text-slate-500">
+          <button className="flex flex-col items-center gap-0.5 text-slate-500 py-1 active:scale-95 transition">
 
-            <span className="text-lg">
+            <span className="text-base leading-none">
               □
             </span>
 
-            <span className="text-[10px] font-semibold">
+            <span className="text-[9px] font-semibold">
               Calendar
             </span>
 
           </button>
 
-          <button className="flex flex-col items-center gap-1 text-slate-500">
+          <button className="flex flex-col items-center gap-0.5 text-slate-500 py-1 active:scale-95 transition">
 
-            <span className="text-lg">
+            <span className="text-base leading-none">
               ≡
             </span>
 
-            <span className="text-[10px] font-semibold">
+            <span className="text-[9px] font-semibold">
               History
             </span>
 
