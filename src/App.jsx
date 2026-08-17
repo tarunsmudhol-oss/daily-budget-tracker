@@ -49,6 +49,107 @@ function formatDate(dateString) {
 }
 
 /* =====================================================
+   DEBT CALCULATION HELPERS
+   ===================================================== */
+
+function calculateDebtThroughDate(historyItems, targetDate) {
+  const expenses = (historyItems || [])
+    .filter((item) => item.type === "expense" && item.date <= targetDate)
+    .map((item) => ({
+      date: item.date,
+      amount: Number(item.amount || 0),
+    }))
+    .filter((item) => Number.isFinite(item.amount) && item.amount > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  if (expenses.length === 0) return 0;
+
+  let debt = 0;
+  let currentDate = expenses[0].date;
+  let index = 0;
+
+  while (currentDate <= targetDate) {
+    // Starting from the second day, recover up to ₹70 before
+    // that day's spending is considered.
+    if (currentDate !== expenses[0].date) {
+      debt = Math.max(0, debt - DAILY_LIMIT);
+    }
+
+    let daySpent = 0;
+
+    while (
+      index < expenses.length &&
+      expenses[index].date === currentDate
+    ) {
+      daySpent += expenses[index].amount;
+      index += 1;
+    }
+
+    if (debt > 0) {
+      // A recovery day is locked. Any existing historical expense
+      // on a locked day is therefore added to the debt.
+      debt += daySpent;
+    } else {
+      debt = Math.max(0, daySpent - DAILY_LIMIT);
+    }
+
+    if (currentDate === targetDate) break;
+    currentDate = addDays(currentDate, 1);
+  }
+
+  return debt;
+}
+
+function rebuildExpenseDebtAfter(historyItems) {
+  const expenses = (historyItems || [])
+    .filter((item) => item.type === "expense")
+    .sort((a, b) => {
+      const dateCompare = a.date.localeCompare(b.date);
+      if (dateCompare !== 0) return dateCompare;
+      return Number(a.id || 0) - Number(b.id || 0);
+    });
+
+  if (expenses.length === 0) return historyItems || [];
+
+  const allDates = [...new Set(expenses.map((item) => item.date))].sort();
+  let debt = 0;
+  let dateIndex = 0;
+  const debtByDate = new Map();
+
+  for (const date of allDates) {
+    if (dateIndex > 0) {
+      const previousDate = allDates[dateIndex - 1];
+      const daysPassed = getDateDifference(previousDate, date);
+
+      for (let i = 0; i < daysPassed; i += 1) {
+        debt = Math.max(0, debt - DAILY_LIMIT);
+        if (debt <= 0) break;
+      }
+    }
+
+    const daySpent = expenses
+      .filter((item) => item.date === date)
+      .reduce((total, item) => total + Number(item.amount || 0), 0);
+
+    debt = debt > 0
+      ? debt + daySpent
+      : Math.max(0, daySpent - DAILY_LIMIT);
+
+    debtByDate.set(date, debt);
+    dateIndex += 1;
+  }
+
+  return (historyItems || []).map((item) => {
+    if (item.type !== "expense") return item;
+
+    return {
+      ...item,
+      debtAfter: debtByDate.get(item.date) || 0,
+    };
+  });
+}
+
+/* =====================================================
    APP
 ===================================================== */
 
@@ -140,6 +241,8 @@ function App() {
     );
 
   const [dataLoaded, setDataLoaded] =
+    useState(false);
+  const [cloudLoadSucceeded, setCloudLoadSucceeded] =
     useState(false);
 
   /* =====================================================
@@ -254,6 +357,7 @@ function App() {
 
     const loadUserData = async () => {
       setDataLoaded(false);
+      setCloudLoadSucceeded(false);
       setAuthError("");
 
       const { data, error } = await supabase
@@ -267,9 +371,13 @@ function App() {
       if (error) {
         console.error("Error loading cloud data:", error);
         setAuthError(
-          "Could not load your data. Check the Supabase table and RLS policies."
+          "Could not load your saved data. Your existing cloud data was NOT overwritten. Please check Supabase/Vercel settings and reload."
         );
-        setDataLoaded(true);
+        // CRITICAL: never mark data as loaded after a cloud-read failure.
+        // Otherwise the save effect could overwrite real cloud data with
+        // empty/default React state during a deployment or connection error.
+        setDataLoaded(false);
+        setCloudLoadSucceeded(false);
         return;
       }
 
@@ -461,6 +569,31 @@ function App() {
           currentSpent = 0;
         }
 
+        // Rebuild the real debt from the complete expense history.
+        // This is important when an expense was entered for an older date
+        // such as 15-Aug while the current date is already 17-Aug.
+        const hasExpenses = currentHistory.some(
+          (item) => item.type === "expense"
+        );
+
+        if (hasExpenses) {
+          currentDebt = calculateDebtThroughDate(
+            currentHistory,
+            todayString
+          );
+
+          currentSpent = currentHistory
+            .filter(
+              (item) =>
+                item.type === "expense" &&
+                item.date === todayString
+            )
+            .reduce(
+              (total, item) => total + Number(item.amount || 0),
+              0
+            );
+        }
+
         const savedPlans =
           sourceData.savingsPlans || [];
 
@@ -514,6 +647,8 @@ function App() {
         );
       }
 
+      // The cloud read completed successfully. Only now may the save effect run.
+      setCloudLoadSucceeded(true);
       setDataLoaded(true);
     };
 
@@ -529,7 +664,12 @@ function App() {
   ===================================================== */
 
   useEffect(() => {
-    if (!authReady || !user || !dataLoaded) {
+    if (
+      !authReady ||
+      !user ||
+      !dataLoaded ||
+      !cloudLoadSucceeded
+    ) {
       return;
     }
 
@@ -589,6 +729,7 @@ function App() {
     authReady,
     user,
     dataLoaded,
+    cloudLoadSucceeded,
     spentToday,
     debt,
     lastDate,
@@ -674,6 +815,7 @@ function App() {
 
     setUser(null);
     setDataLoaded(false);
+    setCloudLoadSucceeded(false);
   };
 
   /* =====================================================
@@ -694,22 +836,8 @@ function App() {
   }, [selectedDayItems]);
 
   const selectedDebt = useMemo(() => {
-    if (selectedDate === todayString) {
-      return debt;
-    }
-
-    const debtItems = selectedDayItems.filter(
-      (item) =>
-        (item.type === "expense" || item.type === "recovery") &&
-        item.debtAfter !== undefined
-    );
-
-    if (debtItems.length === 0) {
-      return 0;
-    }
-
-    return Number(debtItems[debtItems.length - 1].debtAfter || 0);
-  }, [selectedDate, selectedDayItems, todayString, debt]);
+    return calculateDebtThroughDate(history, selectedDate);
+  }, [history, selectedDate]);
 
   const selectedAvailable =
     selectedDebt > 0
@@ -753,49 +881,88 @@ function App() {
       return;
     }
 
-    if (selectedDate === todayString && debt > 0) {
-      const newDebt = debt + amount;
+    // CALENDAR LOCK IS VISUAL ONLY.
+    // The user can still add/edit expenses on locked dates.
+    // Every new expense recalculates the recovery period.
 
-      setDebt(newDebt);
-      setHistory((previous) => [
+    const newExpense = {
+      id: Date.now(),
+      type: "expense",
+      amount,
+      date: selectedDate,
+      debtAfter: 0,
+    };
+
+    setHistory((previous) => {
+      const nextHistory = [
         ...previous,
-        {
-          id: Date.now(),
-          type: "expense",
-          amount,
-          date: selectedDate,
-          debtAfter: newDebt,
-        },
-      ]);
-      setExpenseInput("");
-      return;
-    }
+        newExpense,
+      ];
 
-    const daySpentBefore = selectedSpent;
-    const baseDebt = selectedDebt;
-    const newSpent = daySpentBefore + amount;
-    const newDebt =
-      baseDebt > 0
-        ? baseDebt + amount
-        : Math.max(0, newSpent - DAILY_LIMIT);
+      const rebuiltHistory = rebuildExpenseDebtAfter(nextHistory);
+      const currentDebt = calculateDebtThroughDate(
+        rebuiltHistory,
+        todayString
+      );
 
-    setHistory((previous) => [
-      ...previous,
-      {
-        id: Date.now(),
-        type: "expense",
-        amount,
-        date: selectedDate,
-        debtAfter: newDebt,
-      },
-    ]);
+      if (selectedDate === todayString) {
+        const todaySpent = rebuiltHistory
+          .filter(
+            (item) =>
+              item.type === "expense" &&
+              item.date === todayString
+          )
+          .reduce(
+            (total, item) => total + Number(item.amount || 0),
+            0
+          );
 
-    if (selectedDate === todayString) {
-      setSpentToday(newSpent);
-      setDebt(newDebt);
-    }
+        setSpentToday(todaySpent);
+        setDebt(currentDebt);
+      } else {
+        // This is the important fix for retroactive entries.
+        // Adding ₹2,116 on 15-Aug must also update today's debt
+        // and lock the current/future recovery days.
+        setDebt(currentDebt);
+      }
+
+      return rebuiltHistory;
+    });
 
     setExpenseInput("");
+
+    // Calculate the final debt after adding the new expense so the
+    // user gets an immediate explanation when the limit is exceeded.
+    const projectedHistory = rebuildExpenseDebtAfter([
+      ...history,
+      newExpense,
+    ]);
+    const projectedTodayDebt = calculateDebtThroughDate(
+      projectedHistory,
+      todayString
+    );
+
+    if (projectedTodayDebt > 0) {
+      const daySpent = projectedHistory
+        .filter(
+          (item) =>
+            item.type === "expense" &&
+            item.date === selectedDate
+        )
+        .reduce(
+          (total, item) => total + Number(item.amount || 0),
+          0
+        );
+
+      if (daySpent > DAILY_LIMIT) {
+        alert(
+          `Daily limit exceeded.\n\n` +
+          `Spent on ${formatDate(selectedDate)}: ₹${daySpent}\n` +
+          `Daily limit: ₹${DAILY_LIMIT}\n\n` +
+          `Spending is now LOCKED until the debt is fully recovered.`
+        );
+      }
+    }
   };
 
   /* =====================================================
@@ -823,87 +990,40 @@ function App() {
       return;
     }
 
-    setHistory((previous) => {
-      const updated = previous.map((item) =>
-        item.id === expenseId
-          ? { ...item, amount: newAmount }
-          : item
-      );
+    const updatedHistory = history.map((item) =>
+      item.id === expenseId
+        ? { ...item, amount: newAmount }
+        : item
+    );
 
-      // Keep debt-after values consistent for every expense on the edited day.
-      const dayItems = updated.filter(
+    const rebuiltHistory = rebuildExpenseDebtAfter(updatedHistory);
+    const currentDebt = calculateDebtThroughDate(
+      rebuiltHistory,
+      todayString
+    );
+
+    const todaySpent = rebuiltHistory
+      .filter(
         (item) =>
-          (item.type === "expense" || item.type === "saving") &&
-          item.date === expense.date
-      );
-
-      const dayExpenses = dayItems.filter(
-        (item) => item.type === "expense"
-      );
-
-      if (dayExpenses.length === 0) {
-        return updated;
-      }
-
-      const firstOriginal = previous.find(
-        (item) => item.id === dayExpenses[0].id
-      );
-
-      // Preserve any debt that existed before the first expense of this day.
-      const startingDebt = Math.max(
-        0,
-        Number(firstOriginal?.debtAfter || 0) -
-          Number(firstOriginal?.amount || 0)
-      );
-
-      let cumulativeUsage = 0;
-
-      return updated.map((item) => {
-        if (item.date !== expense.date || item.type !== "expense") {
-          return item;
-        }
-
-        cumulativeUsage += Number(item.amount || 0);
-
-        const debtAfter =
-          startingDebt > 0
-            ? startingDebt + cumulativeUsage
-            : Math.max(0, cumulativeUsage - DAILY_LIMIT);
-
-        return { ...item, debtAfter };
-      });
-    });
-
-    if (expense.date === todayString) {
-      const updatedTodayExpenses = history
-        .filter((item) => item.type === "expense" && item.date === todayString)
-        .map((item) =>
-          item.id === expenseId ? newAmount : Number(item.amount || 0)
-        );
-
-      const todaySpent = updatedTodayExpenses.reduce(
-        (total, amount) => total + Number(amount || 0),
+          item.type === "expense" &&
+          item.date === todayString
+      )
+      .reduce(
+        (total, item) => total + Number(item.amount || 0),
         0
       );
 
-      setSpentToday(todaySpent);
+    setHistory(rebuiltHistory);
+    setDebt(currentDebt);
+    setSpentToday(todaySpent);
 
-      // Preserve any debt that existed before today's expenses, then
-      // calculate today's remaining debt from the edited total.
-      const firstTodayExpense = history.find(
-        (item) => item.type === "expense" && item.date === todayString
-      );
-
-      const debtBeforeToday = Math.max(
-        0,
-        Number(firstTodayExpense?.debtAfter || 0) -
-          Number(firstTodayExpense?.amount || 0)
-      );
-
-      setDebt(
-        debtBeforeToday > 0
-          ? debtBeforeToday + todaySpent
-          : Math.max(0, todaySpent - DAILY_LIMIT)
+    // If an edited historical expense now creates or removes debt,
+    // immediately reflect that in the current day as well.
+    if (currentDebt > 0) {
+      alert(
+        `Updated successfully.\n\n` +
+        `Current recovery debt: ₹${currentDebt}\n` +
+        `Spending remains locked until the debt is recovered.`
       );
     }
   };
@@ -1521,6 +1641,88 @@ function App() {
      DEBT RECOVERY CALENDAR
   ===================================================== */
 
+  /* =====================================================
+     COMPLETE RECOVERY SCHEDULE
+
+     IMPORTANT:
+     A debt can be created by entering an expense for ANY past
+     date. Once that happens, the lock starts from that past date
+     and continues through TODAY and into future recovery days
+     until the complete debt reaches ₹0.
+  ===================================================== */
+
+  const recoveryStartDate = useMemo(() => {
+    if (debt <= 0) return null;
+
+    const expenses = history
+      .filter(
+        (item) =>
+          item.type === "expense" &&
+          item.date <= todayString
+      )
+      .sort((a, b) => {
+        const dateCompare = a.date.localeCompare(b.date);
+        if (dateCompare !== 0) return dateCompare;
+        return Number(a.id || 0) - Number(b.id || 0);
+      });
+
+    if (expenses.length === 0) return null;
+
+    let runningDebt = 0;
+    let previousDate = expenses[0].date;
+    let currentOutstandingStart = null;
+
+    const dates = [...new Set(expenses.map((item) => item.date))].sort();
+
+    for (const date of dates) {
+      if (date !== previousDate) {
+        const daysPassed = getDateDifference(previousDate, date);
+
+        for (let day = 1; day < daysPassed; day += 1) {
+          if (runningDebt > 0) {
+            runningDebt = Math.max(0, runningDebt - DAILY_LIMIT);
+            if (runningDebt === 0) {
+              currentOutstandingStart = null;
+            }
+          }
+        }
+
+        // Recover on the date immediately before the next expense date.
+        if (daysPassed > 0 && runningDebt > 0) {
+          runningDebt = Math.max(0, runningDebt - DAILY_LIMIT);
+          if (runningDebt === 0) {
+            currentOutstandingStart = null;
+          }
+        }
+      }
+
+      const daySpent = expenses
+        .filter((item) => item.date === date)
+        .reduce(
+          (total, item) => total + Number(item.amount || 0),
+          0
+        );
+
+      if (runningDebt > 0) {
+        runningDebt += daySpent;
+      } else {
+        runningDebt = Math.max(0, daySpent - DAILY_LIMIT);
+      }
+
+      if (runningDebt > 0) {
+        if (!currentOutstandingStart) {
+          currentOutstandingStart = date;
+        }
+      } else {
+        currentOutstandingStart = null;
+      }
+
+      previousDate = date;
+    }
+
+    return currentOutstandingStart;
+  }, [history, todayString, debt]);
+
   const recoveryDays =
     debt > 0
       ? Math.ceil(debt / DAILY_LIMIT)
@@ -1529,55 +1731,72 @@ function App() {
   const lockedDates = useMemo(() => {
     const dates = new Set();
 
-    if (debt > 0) {
-      dates.add(todayString);
-
-      for (let i = 1; i <= recoveryDays; i++) {
-        dates.add(addDays(todayString, i));
-      }
+    if (debt <= 0 || !recoveryStartDate) {
+      return dates;
     }
 
-    history.forEach((item) => {
-      if (
-        item.type === "expense" &&
-        Number(item.debtAfter || 0) > 0
-      ) {
-        dates.add(item.date);
-      }
+    // LOCK EVERY DATE from the date that created the outstanding debt
+    // through today. This includes dates where no expense was entered.
+    let cursor = recoveryStartDate;
+    while (cursor <= todayString) {
+      dates.add(cursor);
+      cursor = addDays(cursor, 1);
+    }
 
-      if (
-        item.type === "recovery" &&
-        Number(item.debtAfter || 0) > 0
-      ) {
-        dates.add(item.date);
-      }
-    });
+    // Continue the lock into the future until today's outstanding debt
+    // is fully recovered.
+    for (let i = 1; i <= recoveryDays; i += 1) {
+      dates.add(addDays(todayString, i));
+    }
 
     return dates;
-  }, [debt, history, todayString, recoveryDays]);
+  }, [
+    debt,
+    recoveryStartDate,
+    todayString,
+    recoveryDays,
+  ]);
 
   const getRecoveryAmountForDate = (dateString) => {
-    if (debt <= 0) return 0;
+    if (debt <= 0 || !recoveryStartDate) return 0;
 
-    const daysFromToday = getDateDifference(
-      todayString,
-      dateString
-    );
-
-    if (
-      daysFromToday < 1 ||
-      daysFromToday > recoveryDays
-    ) {
+    // The day on which the debt is created does not recover anything.
+    if (dateString <= recoveryStartDate) {
       return 0;
     }
 
-    const recoveredBefore =
-      (daysFromToday - 1) * DAILY_LIMIT;
+    // Future recovery is calculated from the current outstanding debt.
+    if (dateString > todayString) {
+      const daysFromToday = getDateDifference(
+        todayString,
+        dateString
+      );
 
-    return Math.min(
-      DAILY_LIMIT,
-      Math.max(0, debt - recoveredBefore)
+      if (daysFromToday < 1 || daysFromToday > recoveryDays) {
+        return 0;
+      }
+
+      const recoveredBefore =
+        (daysFromToday - 1) * DAILY_LIMIT;
+
+      return Math.min(
+        DAILY_LIMIT,
+        Math.max(0, debt - recoveredBefore)
+      );
+    }
+
+    // For a past/current date, calculate the debt immediately before
+    // that date. This makes the calendar correctly show recovery days
+    // even when the original overspending was entered later for a past day.
+    const dayBefore = addDays(dateString, -1);
+    const debtBeforeDate = calculateDebtThroughDate(
+      history,
+      dayBefore
     );
+
+    if (debtBeforeDate <= 0) return 0;
+
+    return Math.min(DAILY_LIMIT, debtBeforeDate);
   };
 
   /* =====================================================
@@ -2387,7 +2606,8 @@ function App() {
                   </span>
                 </div>
 
-                <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="mt-4 max-h-[420px] overflow-y-auto pr-1 sm:pr-2 rounded-2xl">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
 
                   {Array.from(
                     { length: recoveryDays },
@@ -2460,6 +2680,7 @@ function App() {
                     }
                   )}
 
+                  </div>
                 </div>
               </div>
             </>
